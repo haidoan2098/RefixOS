@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# scripts/qemu_debug.sh - Start QEMU with GDB server
+# scripts/qemu/debug.sh — Start QEMU with GDB server
+#
+# Usage: bash scripts/qemu/debug.sh
+# Then in another terminal: bash scripts/qemu/gdb_connect.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 KERNEL="${PROJECT_ROOT}/build/kernel.elf"
 MACHINE="realview-pb-a8"
@@ -24,7 +27,7 @@ echo "       GDB port: 1234"
 echo "       Exit    : Press Ctrl+A then 'x' to quit"
 echo ""
 echo "[INFO] In another terminal, run:"
-echo "       ./scripts/gdb_connect.sh"
+echo "       bash scripts/qemu/gdb_connect.sh"
 echo ""
 
 exec qemu-system-arm \

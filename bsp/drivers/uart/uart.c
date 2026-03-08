@@ -5,8 +5,7 @@
  *   PLATFORM_QEMU → PL011 UART (ARM PrimeCell UART)
  *   PLATFORM_BBB  → NS16550 compatible (AM335x UART0)
  *
- * All addresses come from bsp/include/board.h — never hard-coded.
- * All register accesses use volatile pointer per hardware rules.
+ * Platform-specific base addresses come from bsp/include/board.h.
  * =========================================================== */
 
 #include <stdint.h>
@@ -23,7 +22,6 @@
  * PLATFORM_QEMU — ARM PL011 UART
  *
  * Base: UART0_BASE = 0x10009000U (realview-pb-a8)
- * Reference: ARM PrimeCell UART (PL011) TRM
  * ================================================================ */
 #ifdef PLATFORM_QEMU
 
@@ -52,21 +50,10 @@
 
 void uart_init(void)
 {
-    /* PL011 on QEMU realview-pb-a8 is pre-configured by QEMU firmware.
-     * A minimal init sequence is sufficient:
-     *   1. Disable UART
-     *   2. Set baud rate divisors for 115200 @ 24 MHz reference clock
-     *      IBRD = 13, FBRD = 1  → actual baud ≈ 115107 (0.08% error)
-     *   3. 8N1, FIFO enable
-     *   4. Re-enable UART (TX + RX)
-     *   5. Mask all interrupts — polling mode only */
-
     /* Disable UART before configuration */
     REG32(UART0_BASE + PL011_CR) = 0;
 
-    /* Baud rate: 115200 bps @ 24 MHz
-     * Divisor = 24,000,000 / (16 × 115200) = 13.0208...
-     * IBRD = 13, FBRD = round(0.0208 × 64) = 1 */
+    /* Program baud divisor. */
     REG32(UART0_BASE + PL011_IBRD) = 13U;
     REG32(UART0_BASE + PL011_FBRD) = 1U;
 
@@ -100,12 +87,6 @@ void uart_putc(char c)
  * PLATFORM_BBB — NS16550-compatible UART (AM335x UART0)
  *
  * Base: UART0_BASE = 0x44E09000U
- * Reference: AM335x TRM §19 (UART)
- *            AM335x TRM §8  (PRCM — clock must be enabled first)
- *
- * NOTE: On real BBB, U-Boot already initialises UART0 clock and
- * pinmux before jumping to kernel. uart_init() here only
- * re-configures baud/format in case of a cold start via JTAG.
  * ================================================================ */
 #elif defined(PLATFORM_BBB)
 
@@ -140,27 +121,25 @@ void uart_putc(char c)
 
 void uart_init(void)
 {
-    /* 1. Disable UART */
+    /* Leave operational mode before reconfiguration. */
     REG32(UART0_BASE + NS16550_MDR1) = NS16550_MDR1_RESET;
 
-    /* 2. Disable interrupts — polling mode */
+    /* Early boot uses polling only. */
     REG32(UART0_BASE + NS16550_IER) = 0;
 
-    /* 3. Enable FIFO, clear TX/RX FIFOs */
+    /* Clear FIFO state. */
     REG32(UART0_BASE + NS16550_FCR) =
         NS16550_FCR_EN | NS16550_FCR_RXCLR | NS16550_FCR_TXCLR;
 
-    /* 4. Set baud rate: 115200 @ 48 MHz functional clock
-     *    Divisor = 48,000,000 / (16 × 115200) = 26.04 → 26
-     *    Actual baud = 48,000,000 / (16 × 26) = 115,384 (0.16% error) */
+    /* Program baud divisor. */
     REG32(UART0_BASE + NS16550_LCR) = NS16550_LCR_DLAB | NS16550_LCR_8N1;
     REG32(UART0_BASE + NS16550_DLL) = 26U & 0xFFU;
     REG32(UART0_BASE + NS16550_DLH) = 0U;
 
-    /* 5. 8N1, re-lock divisor (clear DLAB) */
+    /* Return to normal 8N1 line format. */
     REG32(UART0_BASE + NS16550_LCR) = NS16550_LCR_8N1;
 
-    /* 6. Enable UART in 16x mode */
+    /* Re-enter normal UART mode. */
     REG32(UART0_BASE + NS16550_MDR1) = NS16550_MDR1_16X;
 }
 
@@ -170,8 +149,7 @@ void uart_putc(char c)
         uart_putc('\r');
     }
 
-    /* Wait for TX Holding Register Empty
-     * NS16550_LSR.THRE = 1 → safe to write next byte */
+    /* Wait for transmit space. */
     while (!(REG32(UART0_BASE + NS16550_LSR) & NS16550_LSR_THRE))
         ;
 

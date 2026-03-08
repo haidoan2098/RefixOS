@@ -15,12 +15,5 @@ build/
 .DS_Store
 Thumbs.db
 
-# Project management & AI rules (DO NOT PUSH)
-.windsurfrules
-AGENT_RULES.md
-.agents/
 
-# Documentation directories (DO NOT PUSH)
-docs/RefARM-OS/
-docs/trainingAI_docs/
-docs/tech_docs/
+

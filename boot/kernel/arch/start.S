@@ -1,7 +1,9 @@
 /* ===========================================================
  * boot/arch/start.S — RefixOS reset entry point
  *
- * Loaded by QEMU (-kernel) or U-Boot at physical 0x70100000.
+ * QEMU path: QEMU -kernel loads the image at physical 0x70100000.
+ * BBB path: SPL loads the kernel into DDR at physical 0x80000000
+ *           and jumps here after DDR init + image copy.
  * MMU is OFF — every address here is physical.
  *
  * Sequence:
@@ -25,11 +27,13 @@ _start:
     cpsid   if
 
     /* ------------------------------------------------------- */
-    /* 2. Set up per-mode stacks                                */
+    /* 2. Set up early exception-mode stacks                    */
     /*                                                          */
     /*    ARMv7-A has banked SP per exception mode.             */
     /*    We switch to each mode, load SP, then return to SVC.  */
     /*    Stack tops come from linker symbols (physical addr).  */
+    /*    SYS mode is not used in this phase because early       */
+    /*    kernel C code runs entirely in SVC mode.               */
     /*                                                          */
     /*    Mode bits (CPSR[4:0]):                                */
     /*      FIQ  = 0x11, IRQ  = 0x12, SVC = 0x13              */

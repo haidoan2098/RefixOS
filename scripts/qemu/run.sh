@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# scripts/qemu_run.sh — Launch RefixOS on QEMU realview-pb-a8
+# scripts/qemu/run.sh — Launch RefixOS on QEMU realview-pb-a8
 #
 # Requires: qemu-system-arm, kernel ELF in build/
-# Usage: bash scripts/qemu_run.sh [--gdb]
+# Usage: bash scripts/qemu/run.sh [--gdb]
 
 set -euo pipefail
 
-# Find project root (parent of scripts directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-KERNEL="$PROJECT_ROOT/build/kernel.elf"
+KERNEL="$PROJECT_ROOT/build/qemu/kernel.elf"
 MACHINE="realview-pb-a8"
 CPU="cortex-a8"
 MEM="128M"

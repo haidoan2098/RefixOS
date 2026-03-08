@@ -50,7 +50,7 @@
 
   /* Kernel virtual base and physical load address */
   #define KERNEL_VIRT_BASE 0xC0000000U
-  #define KERNEL_PHYS_BASE 0x80100000U
+  #define KERNEL_PHYS_BASE 0x80000000U
 
   /* Physical-to-virtual offset */
   #define PHYS_OFFSET     (KERNEL_VIRT_BASE - RAM_BASE) /* 0x40000000 */

@@ -1,10 +1,28 @@
 # RefixOS — Top-level Makefile
-# Usage: make PLATFORM=qemu  |  make PLATFORM=bbb
+#
+# Usage:
+#   make                  → build for QEMU (default)
+#   make PLATFORM=qemu    → build kernel only (QEMU)
+#   make PLATFORM=bbb     → build SPL + kernel (BeagleBone Black)
 #
 # All output goes to build/
 
 PLATFORM ?= qemu
 PLATFORM_UPPER := $(shell echo $(PLATFORM) | tr a-z A-Z)
+
+# Build directories
+ROOT_BUILD_DIR := $(CURDIR)/build
+PLATFORM_BUILD_DIR := $(ROOT_BUILD_DIR)/$(PLATFORM)
+OBJ_BUILD_DIR := $(ROOT_BUILD_DIR)/obj/$(PLATFORM)
+export ROOT_BUILD_DIR PLATFORM_BUILD_DIR OBJ_BUILD_DIR
+
+# Remember last built platform
+LAST_PLATFORM_FILE := $(ROOT_BUILD_DIR)/.last_platform
+ifneq ($(wildcard $(LAST_PLATFORM_FILE)),)
+  LAST_PLATFORM := $(shell cat $(LAST_PLATFORM_FILE))
+else
+  LAST_PLATFORM := $(PLATFORM)
+endif
 
 export PLATFORM
 export PLATFORM_UPPER
@@ -27,30 +45,37 @@ CFLAGS := -nostdlib -ffreestanding -nostartfiles \
 
 export CFLAGS
 
-BUILD_DIR := $(CURDIR)/build
-export BUILD_DIR
+.DEFAULT_GOAL := all
 
-.PHONY: all boot kernel clean qemu
+.PHONY: all clean qemu
 
-# Create build dir if it doesn't exist
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+# Create build directories
+$(ROOT_BUILD_DIR):
+	mkdir -p $(ROOT_BUILD_DIR)
 
-# boot compiles everything (start.S + kernel/main.c + uart.c) and links
-all: $(BUILD_DIR)
+$(PLATFORM_BUILD_DIR):
+	mkdir -p $(PLATFORM_BUILD_DIR)
+
+$(OBJ_BUILD_DIR):
+	mkdir -p $(OBJ_BUILD_DIR)
+
+# Delegate to boot/Makefile (which dispatches to kernel/ and/or spl/)
+all: $(ROOT_BUILD_DIR) $(PLATFORM_BUILD_DIR) $(OBJ_BUILD_DIR)
+	@echo $(PLATFORM) > $(LAST_PLATFORM_FILE)
 	$(MAKE) -C boot
-
-boot: $(BUILD_DIR)
-	$(MAKE) -C boot
-
-kernel: $(BUILD_DIR)
-	$(MAKE) -C kernel
 
 clean:
 	$(MAKE) -C boot clean
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/*.elf $(BUILD_DIR)/*.bin
+	rm -rf $(ROOT_BUILD_DIR)/$(LAST_PLATFORM) $(ROOT_BUILD_DIR)/obj/$(LAST_PLATFORM)
 
-# Launch QEMU
+clean-all:
+	$(MAKE) -C boot clean
+	rm -rf $(ROOT_BUILD_DIR)/qemu $(ROOT_BUILD_DIR)/bbb $(ROOT_BUILD_DIR)/obj
+
+status:
+	@echo "Current PLATFORM: $(LAST_PLATFORM)"
+
+# Launch QEMU (PLATFORM=qemu only)
 qemu:
-	@bash scripts/qemu_run.sh
+	@bash scripts/qemu/run.sh
 
