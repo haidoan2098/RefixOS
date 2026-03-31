@@ -3,8 +3,8 @@
  *
  * Target (QEMU realview-pb-a8):
  *   Physical RAM base : 0x70000000 (128 MB)
- *   Kernel load PA    : 0x70100000  (skip first 1 MB, reserved
- *                        for future vector table identity map)
+ *   Kernel load PA    : 0x70100000  (first 1 MB reserved for
+ *                        exception vector table + peripheral map)
  *
  * MMU is OFF at entry — CPU uses physical addresses directly.
  * Virtual address split (3G/1G) is enforced later by MMU init.

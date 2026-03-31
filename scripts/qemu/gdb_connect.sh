@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-KERNEL="${PROJECT_ROOT}/build/kernel.elf"
+KERNEL="${PROJECT_ROOT}/build/qemu/kernel.elf"
 GDB_PORT="1234"
 
 if [ ! -f "$KERNEL" ]; then
