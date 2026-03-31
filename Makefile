@@ -1,81 +1,86 @@
-# RefixOS — Top-level Makefile
+# RingNova — Top-level Makefile
 #
 # Usage:
 #   make                  → build for QEMU (default)
-#   make PLATFORM=qemu    → build kernel only (QEMU)
-#   make PLATFORM=bbb     → build SPL + kernel (BeagleBone Black)
+#   make PLATFORM=bbb     → build for BeagleBone Black
+#   make qemu             → build + run on QEMU
+#   make clean            → clean current platform
+#   make clean-all        → clean all platforms
 #
 # All output goes to build/
 
 PLATFORM ?= qemu
 PLATFORM_UPPER := $(shell echo $(PLATFORM) | tr a-z A-Z)
 
-# Build directories
-ROOT_BUILD_DIR := $(CURDIR)/build
-PLATFORM_BUILD_DIR := $(ROOT_BUILD_DIR)/$(PLATFORM)
-OBJ_BUILD_DIR := $(ROOT_BUILD_DIR)/obj/$(PLATFORM)
-export ROOT_BUILD_DIR PLATFORM_BUILD_DIR OBJ_BUILD_DIR
-
-# Remember last built platform
-LAST_PLATFORM_FILE := $(ROOT_BUILD_DIR)/.last_platform
-ifneq ($(wildcard $(LAST_PLATFORM_FILE)),)
-  LAST_PLATFORM := $(shell cat $(LAST_PLATFORM_FILE))
-else
-  LAST_PLATFORM := $(PLATFORM)
-endif
-
-export PLATFORM
-export PLATFORM_UPPER
-
 # Toolchain
-CROSS   ?= arm-none-eabi
-CC      := $(CROSS)-gcc
-AS      := $(CROSS)-as
-LD      := $(CROSS)-ld
-OBJCOPY := $(CROSS)-objcopy
-GDB     := $(CROSS)-gdb
+CROSS   ?= arm-none-eabi-
+CC      := $(CROSS)gcc
+AS      := $(CROSS)as
+LD      := $(CROSS)ld
+OBJCOPY := $(CROSS)objcopy
 
-export CC AS LD OBJCOPY GDB
+# Build directories
+BUILD_DIR := build/$(PLATFORM)
+OBJ_DIR   := build/obj/$(PLATFORM)
 
-# Mandatory compiler flags (Hard constraint — do NOT remove)
+# Linker script
+LDSCRIPT := kernel/linker/kernel_$(PLATFORM).ld
+
+# Mandatory compiler flags
 CFLAGS := -nostdlib -ffreestanding -nostartfiles \
           -mcpu=cortex-a8 -marm \
           -DPLATFORM_$(PLATFORM_UPPER) \
+          -I kernel/include \
+          -I kernel/drivers \
           -Wall -Wextra -g
 
-export CFLAGS
+# Source files
+C_SRCS := kernel/main.c \
+          kernel/drivers/uart/uart.c
+
+S_SRCS := kernel/arch/arm/boot/start.S
+
+# Object files
+C_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_SRCS))
+S_OBJS := $(patsubst %.S,$(OBJ_DIR)/%.o,$(S_SRCS))
+OBJS   := $(S_OBJS) $(C_OBJS)
+
+# Output
+TARGET_ELF := $(BUILD_DIR)/kernel.elf
+TARGET_BIN := $(BUILD_DIR)/kernel.bin
 
 .DEFAULT_GOAL := all
 
-.PHONY: all clean qemu
+.PHONY: all clean clean-all qemu
 
-# Create build directories
-$(ROOT_BUILD_DIR):
-	mkdir -p $(ROOT_BUILD_DIR)
+all: $(TARGET_ELF) $(TARGET_BIN)
+	@echo "[OK] $(TARGET_ELF)"
 
-$(PLATFORM_BUILD_DIR):
-	mkdir -p $(PLATFORM_BUILD_DIR)
+# Link
+$(TARGET_ELF): $(OBJS) $(LDSCRIPT)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS) -lgcc
 
-$(OBJ_BUILD_DIR):
-	mkdir -p $(OBJ_BUILD_DIR)
+# Raw binary for flashing (BBB)
+$(TARGET_BIN): $(TARGET_ELF)
+	$(OBJCOPY) -O binary $< $@
 
-# Delegate to boot/Makefile (which dispatches to kernel/ and/or spl/)
-all: $(ROOT_BUILD_DIR) $(PLATFORM_BUILD_DIR) $(OBJ_BUILD_DIR)
-	@echo $(PLATFORM) > $(LAST_PLATFORM_FILE)
-	$(MAKE) -C boot
+# Compile C
+$(OBJ_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Assemble .S (through gcc for preprocessor support)
+$(OBJ_DIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	$(MAKE) -C boot clean
-	rm -rf $(ROOT_BUILD_DIR)/$(LAST_PLATFORM) $(ROOT_BUILD_DIR)/obj/$(LAST_PLATFORM)
+	rm -rf build/$(PLATFORM) build/obj/$(PLATFORM)
 
 clean-all:
-	$(MAKE) -C boot clean
-	rm -rf $(ROOT_BUILD_DIR)/qemu $(ROOT_BUILD_DIR)/bbb $(ROOT_BUILD_DIR)/obj
+	rm -rf build/
 
-status:
-	@echo "Current PLATFORM: $(LAST_PLATFORM)"
-
-# Launch QEMU (PLATFORM=qemu only)
-qemu:
+# Build + launch QEMU
+qemu: all
 	@bash scripts/qemu/run.sh
-
