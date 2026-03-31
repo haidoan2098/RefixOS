@@ -1,5 +1,5 @@
-#ifndef BSP_UART_H
-#define BSP_UART_H
+#ifndef KERNEL_UART_H
+#define KERNEL_UART_H
 
 #include <stdint.h>
 /*
@@ -13,5 +13,6 @@ void uart_init(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 void uart_print_hex(uint32_t val);
+void uart_printf(const char *fmt, ...);
 
-#endif /* BSP_UART_H */
+#endif /* KERNEL_UART_H */

@@ -1,5 +1,5 @@
-#ifndef BSP_BOARD_H
-#define BSP_BOARD_H
+#ifndef KERNEL_BOARD_H
+#define KERNEL_BOARD_H
 
 /*
  * board.h — Platform-specific addresses and constants
@@ -71,4 +71,4 @@
   #error "Unknown PLATFORM — define PLATFORM_QEMU or PLATFORM_BBB"
 #endif
 
-#endif /* BSP_BOARD_H */
+#endif /* KERNEL_BOARD_H */

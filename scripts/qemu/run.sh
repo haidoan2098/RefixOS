@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/qemu/run.sh — Launch RefixOS on QEMU realview-pb-a8
+# scripts/qemu/run.sh — Launch RingNova on QEMU realview-pb-a8
 #
 # Requires: qemu-system-arm, kernel ELF in build/
 # Usage: bash scripts/qemu/run.sh [--gdb]
@@ -13,7 +13,7 @@ KERNEL="$PROJECT_ROOT/build/qemu/kernel.elf"
 MACHINE="realview-pb-a8"
 CPU="cortex-a8"
 MEM="128M"
-UART_LOG="-serial mon:stdio"
+UART_LOG="-serial mon:vc"
 
 if [ ! -f "$KERNEL" ]; then
     echo "[ERROR] Kernel ELF not found: $KERNEL"
@@ -38,7 +38,6 @@ exec qemu-system-arm \
     -M "$MACHINE" \
     -cpu "$CPU" \
     -m "$MEM" \
-    -nographic \
     $UART_LOG \
     -kernel "$KERNEL" \
     $GDB_FLAGS

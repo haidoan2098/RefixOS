@@ -1,5 +1,5 @@
 /* ===========================================================
- * boot/arch/start.S — RefixOS reset entry point
+ * kernel/arch/arm/boot/start.S — RingNova reset entry point
  *
  * QEMU path: QEMU -kernel loads the image at physical 0x70100000.
  * BBB path: SPL loads the kernel into DDR at physical 0x80000000
