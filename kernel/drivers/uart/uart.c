@@ -1,14 +1,15 @@
 /* ===========================================================
- * bsp/drivers/uart/uart.c — UART driver
+ * kernel/drivers/uart/uart.c — UART driver
  *
  * Supports two hardware backends selected at compile time:
  *   PLATFORM_QEMU → PL011 UART (ARM PrimeCell UART)
  *   PLATFORM_BBB  → NS16550 compatible (AM335x UART0)
  *
- * Platform-specific base addresses come from bsp/include/board.h.
+ * Platform-specific base addresses come from kernel/include/board.h.
  * =========================================================== */
 
 #include <stdint.h>
+#include <stdarg.h>
 #include "../../include/board.h"
 #include "uart.h"
 
@@ -180,4 +181,118 @@ void uart_print_hex(uint32_t val)
     for (i = 28; i >= 0; i -= 4) {
         uart_putc(digits[(val >> i) & 0xFU]);
     }
+}
+
+/*
+ * uart_print_dec() — Print unsigned 32-bit integer in decimal.
+ */
+static void uart_print_dec(uint32_t val)
+{
+    char buf[10]; /* max 10 digits for uint32 */
+    int i = 0;
+
+    if (val == 0) {
+        uart_putc('0');
+        return;
+    }
+    while (val > 0) {
+        buf[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    while (--i >= 0) {
+        uart_putc(buf[i]);
+    }
+}
+
+/*
+ * uart_print_int() — Print signed 32-bit integer in decimal.
+ */
+static void uart_print_int(int32_t val)
+{
+    if (val < 0) {
+        uart_putc('-');
+        uart_print_dec((uint32_t)(-(val + 1)) + 1);
+    } else {
+        uart_print_dec((uint32_t)val);
+    }
+}
+
+/*
+ * uart_printf() — Minimal printf for kernel debug output.
+ *
+ * Supported format specifiers:
+ *   %c   — character
+ *   %s   — string
+ *   %d   — signed decimal int
+ *   %u   — unsigned decimal int
+ *   %x   — hex (lowercase, no prefix)
+ *   %p   — pointer (0x prefix, zero-padded 8 digits)
+ *   %08x — zero-padded 8-digit hex (only 08 width supported)
+ *   %%   — literal '%'
+ */
+void uart_printf(const char *fmt, ...)
+{
+    static const char hex[] = "0123456789abcdef";
+    va_list ap;
+    uint32_t uval;
+    int i;
+
+    va_start(ap, fmt);
+
+    while (*fmt) {
+        if (*fmt != '%') {
+            uart_putc(*fmt++);
+            continue;
+        }
+        fmt++; /* skip '%' */
+
+        /* Check for %08x */
+        if (fmt[0] == '0' && fmt[1] == '8' && fmt[2] == 'x') {
+            uval = va_arg(ap, uint32_t);
+            for (i = 28; i >= 0; i -= 4)
+                uart_putc(hex[(uval >> i) & 0xFU]);
+            fmt += 3;
+            continue;
+        }
+
+        switch (*fmt) {
+        case 'c':
+            uart_putc((char)va_arg(ap, int));
+            break;
+        case 's':
+            uart_puts(va_arg(ap, const char *));
+            break;
+        case 'd':
+            uart_print_int(va_arg(ap, int32_t));
+            break;
+        case 'u':
+            uart_print_dec(va_arg(ap, uint32_t));
+            break;
+        case 'x':
+            uval = va_arg(ap, uint32_t);
+            for (i = 28; i >= 0; i -= 4) {
+                if ((uval >> i) & 0xFU || i == 0)
+                    break;
+            }
+            for (; i >= 0; i -= 4)
+                uart_putc(hex[(uval >> i) & 0xFU]);
+            break;
+        case 'p':
+            uval = va_arg(ap, uint32_t);
+            uart_puts("0x");
+            for (i = 28; i >= 0; i -= 4)
+                uart_putc(hex[(uval >> i) & 0xFU]);
+            break;
+        case '%':
+            uart_putc('%');
+            break;
+        default:
+            uart_putc('%');
+            uart_putc(*fmt);
+            break;
+        }
+        fmt++;
+    }
+
+    va_end(ap);
 }
