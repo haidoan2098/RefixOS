@@ -1,43 +1,54 @@
-/* ===========================================================
- * kernel/linker/kernel_bbb.ld — RingNova Kernel Linker Script
- *
- * Target: BeagleBone Black (AM335x)
- *   Physical DDR base : 0x80000000 (512 MB)
- *   Kernel load PA    : 0x80000000  (SPL loads kernel here)
- *   Linker RAM window  : 0x80000000-0x9FFFFFFF (full 512 MB DDR)
- *
- * MMU is OFF at entry — CPU uses physical addresses directly.
- * SPL jumps here after DDR init.
- * =========================================================== */
+/*
+ * Linker Script - Ngôn ngữ của địa chỉ 
+ */
 
-ENTRY(_start)
+/*
+ * symbol _start nó là 1 tên đại diện cho địa chỉ tại đó thôi. 
+ * Nó điền giá trị vào field e_entry trong ELF header. 
+ * Nếu ko có ENTRY(..). e_entry để mặc định là 0x0
+ * Nó chỉ hỗ trợ cho các thành phần nào đọc file ELF thôi.
+ * Ví dụ: QEMU đọc elf để chạy. nó thấy e_entry = _start thì con trỏ PC sẽ nhảy đến đây. 
+ * Ví dụ: GDB đọc elf để debug. nó thấy e_entry = _start thì con trỏ PC sẽ nhảy đến đây để đặt breakpoint.
 
-MEMORY
+ * Khi build thì elf được tạo ra chứa (nếu đọc thì toàn là hex) vì thế objdump là tool để dịch ngược lại từ elf sang assembly để đọc được. 
+ * trong elf có nhiều phần khác nhau ví dụ: elf header, segment header table, .init, .text, .rodata, .data, .bss, .symtab, .debug, .line, .strtab
+ * bin sẽ có các thành phần trong elf: .text, .rodata, .data, .bss nhưng sẽ được chuẩn hóa thành dãy byte code
+ * để debug: nó phải áp dụng nhiều section khác nhau:
+ * symtab chứa thông tin về symbol (ofset, địa chỉ) tra strtab để lấy tên hàm ra nhưng lại ko biết dòng nào
+ * .debug: source file, chứa tên biến local, kiểu dữ liệu + .line biết dòng source
+ * .text     → bytes thực tế để disassemble
+
+ * Vậy khi objdump mình cần quan tâm đến các section nào:
+ * Section Header Table. Xem .text, .data, .bss, .stack nằm đúng địa chỉ chưa.
+ * .symtab + .strtab. Xem _start, stack tops, _bss_start đúng địa chỉ chưa.
+ * .text + .symtab. Xem instructions thực tế CPU sẽ chạy.
+ */
+ENTRY(_start) 
+
+MEMORY 
 {
-    /* Full physical DDR exposed to the kernel image + early stacks.
-     * BBB SPL enters the kernel at 0x80000000 and this linker stage does not reserve a carve-out. */
-    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 512M
+    /* 
+     * Sau khi Booloader hoàn thành phần setup (trong đó có khởi tạo DRAM)
+     * Có DRAM để chạy các ct lớn rồi nhưng chưa thể vào kernel ngay cần setup mt
+     */
+
+    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 512M /**/
 }
 
 SECTIONS
 {
-    /* -------------------------------------------------------
-     * .text — executable code
-     *   .text.start must be first so _start lands at ORIGIN
-     * ------------------------------------------------------- */
     .text :
     {
-        _text_start = .;
-        *(.text.start)      /* _start — must be first          */
-        *(.text*)
+        _text_start = .;    /* vị trí con trỏ hiện tại: là 0x80000000*/
+        *(.text.start)     /* _start — must be first    |  tìm file .o nào có section .text.start, kéo bytes đó vào đây.      */
+                            /*kích thước con trỏ tự tăng lên*/
+        *(.text*)        
         *(.rodata*)
         . = ALIGN(4);
-        _text_end = .;
-    } > RAM
+        _text_end = .;      /* vị trí con trỏ kết thúc */
+    } > RAM          /*đặt section .text này vào vùng nhớ tên RAM đã khai báo ở trên*/
 
-    /* -------------------------------------------------------
-     * .data — initialised data
-     * ------------------------------------------------------- */
+    /* vùng nhớ biến global đã được khởi tạo*/
     .data :
     {
         . = ALIGN(4);
@@ -47,52 +58,24 @@ SECTIONS
         _data_end = .;
     } > RAM
 
-    /* -------------------------------------------------------
-     * .bss — zero-initialised data
-     *   NOLOAD: occupies PA space but not in ELF file.
-     *   Zeroed manually in start.S before bl kmain.
-     * ------------------------------------------------------- */
-    .bss (NOLOAD) :
-    {
+    /* vùng nhớ biến global chưa được khởi tạo */
+    .bss (NOLOAD) :     /*NOLOAD ở đây nghĩa là ko load dữ liệu vào bộ nhớ*/
+    {                   /*nhưng vùng bss các biến global ko gán giá trị sẽ có giá trị là 0 mà*/
+                        /*Lí do là bên _start nó sẽ zero bss phân vùng này đi nên giá trị trong vùng này là 0  */
         . = ALIGN(8);
         _bss_start = .;
         *(.bss*)
         *(COMMON)
         . = ALIGN(8);
         _bss_end = .;
-    } > RAM
+    } > RAM 
 
-    /* -------------------------------------------------------
-     * .stack — per-mode exception stacks
-     *   Placed after BSS, grows down within each slot.
-     *   TOTAL: 512 + 1K + 1K + 1K + 8K = 11.5 KB
-     * ------------------------------------------------------- */
-    .stack (NOLOAD) :
+    .stack (NOLOAD) : 
     {
         . = ALIGN(8);
-
+        
         /* FIQ stack — 512 B */
-        . = . + 0x200;
-        PROVIDE(_fiq_stack_top = .);
-
-        /* IRQ stack — 1 KB */
-        . = . + 0x400;
-        PROVIDE(_irq_stack_top = .);
-
-        /* Abort (prefetch + data) stack — 1 KB */
-        . = . + 0x400;
-        PROVIDE(_abt_stack_top = .);
-
-        /* Undefined instruction stack — 1 KB */
-        . = . + 0x400;
-        PROVIDE(_und_stack_top = .);
-
-        /* SVC (Supervisor) stack — 8 KB
-           Kernel C code runs in SVC mode → needs the most space */
-        . = . + 0x2000;
-        PROVIDE(_svc_stack_top = .);
-    } > RAM
-
-    /* Symbols for heap start (future kmalloc) */
-    PROVIDE(_heap_start = .);
+        . = . + 0x200; 
+        PROVIDE(_fig_stack_top = .);
+    }
 }
