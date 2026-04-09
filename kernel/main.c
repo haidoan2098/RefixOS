@@ -12,6 +12,7 @@
 
 #include "drivers/uart/uart.h"
 #include "include/board.h"
+#include "include/exception.h"
 
 /* Linker-provided symbols */
 extern uint32_t _text_start, _text_end;
@@ -62,9 +63,18 @@ void kmain(void)
                 (cpsr & (1U << 7)) ? "masked" : "on",
                 (cpsr & (1U << 6)) ? "masked" : "on");
     uart_printf("[BOOT] MMU      : off\n");
+
+    /* ---- Phase 2: Exception handling ---- */
+    exception_init();
+
+    /* Test SVC — should print syscall number and return */
+    uart_printf("[TEST] triggering SVC #42...\n");
+    __asm__ volatile("svc #42");
+    uart_printf("[TEST] SVC returned OK\n");
+
     uart_printf("[BOOT] boot complete — entering idle loop\n");
 
     /* Halt — scheduler not implemented yet */
     for (;;)
-        ;
+        __asm__ volatile("wfi");
 }

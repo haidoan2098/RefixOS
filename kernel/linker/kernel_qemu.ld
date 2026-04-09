@@ -28,6 +28,8 @@ SECTIONS
     {
         _text_start = .;
         *(.text.start)      /* _start — must be first          */
+        . = ALIGN(32);
+        *(.vectors)         /* exception vector table           */
         *(.text*)
         *(.rodata*)
         . = ALIGN(4);
