@@ -1,27 +1,76 @@
-    .section .text.start, "ax"  ; Đây là vùng chứa mã của start, vùng này phải được đặt đầu tiên, 
-                                ; để khi bootloader chạy xong thì nhảy vào để đoạn setup này chạy trước 
-                                ; Ghi section này ở đầu thì toàn bộ code ở dưới sẽ nằm trong section này 
-                                ; "ax" có nghĩa là section này có thể được thực thi (executable) và có thể 
-                                ; được ghi (allocatable) vào bộ nhớ. 
-                                
-    .align  4 ; Căn chỉnh địa chỉ của đoạn mã này lên bội số của 4, vì ARM là kiến trúc 32-bit, mỗi lệnh có kích thước 4 byte.
+/* ===========================================================
+ * kernel/arch/arm/boot/start.S — RingNova reset entry point
+ *
+ * QEMU path: QEMU -kernel loads the image at physical 0x70100000.
+ * BBB path: SPL loads the kernel into DDR at physical 0x80000000
+ *           and jumps here after DDR init + image copy.
+ * MMU is OFF — every address here is physical.
+ *
+ * Sequence:
+ *   1. Mask all interrupts
+ *   2. Set up exception-mode stacks
+ *   3. Switch to SVC mode (kernel runs in SVC)
+ *   4. Zero BSS
+ *   5. bl kmain   — never returns
+ * =========================================================== */
 
+    .section .text.start, "ax"
+    .align  4
+    .global _start
 
-; label trong assembly dùng để đại diện 1 vùng nhớ, CPU nó vẫn thấy là địa chỉ thôi 
-; có label thì lập trình dễ kiểm soát hơn thay vì địa chỉ thô, thay vì nhớ địa chỉ thì nhớ label là được
-; ngoài ra việc có label cũng giúp cho việc debug dễ hơn, có thể đặt breakpoint vào label đó để xem CPU chạy đến đó thì làm gì tiếp theo.
-; Nếu không có label thì cũng được, nhưng có thì dễ đọc hơn, vì nó cho biết đây là điểm bắt đầu của chương trình.
-; Có thể đưa lệnh dưới lên luôn cũng được, ko cần lable, nhưng có label cho dễ debug, trong môi trường lệnh ko có GUI thì nhớ label để đặt breakpoint dễ hơn.
+_start:
+    /* ------------------------------------------------------- */
+    /* 1. Disable IRQ and FIQ at CPU level                      */
+    /* ------------------------------------------------------- */
+    cpsid   if
 
-_start:   ; Đoạn code setup sẽ chạy từ đây, bên bootloader thì nó nhảy vào 0x80000000 
-          ; label _start là có hay ko có cũng được, nhưng có thì dễ đọc hơn, vì nó cho biết đây là điểm bắt đầu của chương trình.
-          ; Có thể đưa lệnh dưới lên luôn cũng được, ko cần lable
-          ; có label cho dễ debug, trong môi trường lệnh ko có GUI thì nhớ label để đặt breakpoint dễ hơn.
-    cpsid   if      // Tắt IRQ và FIQ của CPU 
-    
-    ; CPU ARM có nhiều mode, mỗi mode cần 1 stack riêng, chỉ được truy cập khi đang ở 
-    ; mode đó, nên phải chuyển sang từng mode để thiết lập stack pointer (SP) cho từng mode.
-    
-    cps     #0x11  // Chuyển sang FIQ mode 
-    ldr    sp, =_fiq_stack_top  // Thiết lập SP cho FIQ mode, địa chỉ này được định nghĩa trong linker script, nó là địa chỉ vật lý của stack top cho FIQ mode.
-    
+    /* ------------------------------------------------------- */
+    /* 2. Set up early exception-mode stacks                    */
+    /*                                                          */
+    /*    Mode bits (CPSR[4:0]):                                */
+    /*      FIQ  = 0x11, IRQ  = 0x12, SVC = 0x13              */
+    /*      ABT  = 0x17, UND  = 0x1B, SYS = 0x1F              */
+    /* ------------------------------------------------------- */
+
+    /* FIQ mode — 512 B */
+    cps     #0x11
+    ldr     sp, =_fiq_stack_top
+
+    /* IRQ mode — 1 KB */
+    cps     #0x12
+    ldr     sp, =_irq_stack_top
+
+    /* Abort mode — 1 KB */
+    cps     #0x17
+    ldr     sp, =_abt_stack_top
+
+    /* Undefined mode — 1 KB */
+    cps     #0x1B
+    ldr     sp, =_und_stack_top
+
+    /* SVC (Supervisor) mode — 8 KB; kernel runs here */
+    cps     #0x13
+    ldr     sp, =_svc_stack_top
+
+    /* ------------------------------------------------------- */
+    /* 3. Zero BSS                                              */
+    /* ------------------------------------------------------- */
+    ldr     r0, =_bss_start
+    ldr     r1, =_bss_end
+    mov     r2, #0
+.Lzero_bss:
+    cmp     r0, r1
+    strlo   r2, [r0], #4
+    blo     .Lzero_bss
+
+    /* ------------------------------------------------------- */
+    /* 4. Jump to C entry point                                 */
+    /* ------------------------------------------------------- */
+    bl      kmain
+
+    /* ------------------------------------------------------- */
+    /* 5. Safety halt — should never reach here                 */
+    /* ------------------------------------------------------- */
+.Lhalt:
+    wfi
+    b       .Lhalt
