@@ -6,6 +6,57 @@
 
 ---
 
+## Đã xây dựng đến đâu
+
+Đây là chapter đầu tiên — toàn bộ đều mới (★). Sau chapter này, system trông như sau:
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    User space                       │
+│                    (chưa có)                         │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────────────────────────────────────┐
+│                  Kernel (SVC mode)                   │
+│                                                      │
+│   ┌─────────────────┐                                │
+│   │  ★ kmain        │── boot log ra UART             │
+│   └─────────────────┘                                │
+│           │                                          │
+│           ▼                                          │
+│   ┌─────────────────┐    ┌─────────────────────┐     │
+│   │ ★ UART driver   │    │ ★ Boot sequence     │     │
+│   │   PL011 (QEMU)  │    │   (start.S)         │     │
+│   │   NS16550 (BBB) │    │   stacks/BSS/jumpC  │     │
+│   └─────────────────┘    └─────────────────────┘     │
+│                                                      │
+│   MMU: OFF · IRQ: masked · Exceptions: chưa có       │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                      Hardware
+                CPU · RAM · UART
+```
+
+**Flow khởi động:**
+
+```mermaid
+flowchart LR
+    A[Reset] --> B["★ start.S<br/>mask IRQ<br/>setup stacks<br/>zero BSS"]
+    B --> C["★ kmain"]
+    C --> D["★ uart_init"]
+    D --> E[boot log]
+    E --> F[idle loop]
+
+    style B fill:#ffe699,stroke:#e8a700,color:#000
+    style C fill:#ffe699,stroke:#e8a700,color:#000
+    style D fill:#ffe699,stroke:#e8a700,color:#000
+```
+
+System đi từ **không có gì** (CPU vừa cấp điện) đến **chạy được C code và in được text**.
+Đây là điểm xuất phát — mọi chapter sau xây dựng tiếp lên trên nền này.
+
+---
+
 ## Nguyên lý
 
 ### CPU khi mới cấp nguồn
@@ -119,6 +170,70 @@ Exception stacks chỉ cần đủ cho vài instruction trampoline rồi switch 
 | UART | PL011 (ARM PrimeCell) | NS16550 (AM335x UART0) |
 
 Code C **giống nhau**. Khác nhau là linker script (address) và UART driver (register set).
+
+---
+
+## Cách hoạt động
+
+### CPU đi qua các mode để setup banked SP
+
+ARMv7 có **banked SP** — mỗi mode có SP riêng biệt. Khi CPU đang ở mode X, instruction
+`ldr sp, ...` chỉ ghi vào SP_X. Muốn set SP cho mode Y → phải `cps` chuyển sang mode Y trước.
+
+Boot code tuần tự đi qua 5 mode để set 5 SP. Sau mỗi `cps + ldr sp`, banked SP của mode đó
+chuyển từ "rác" sang "valid". Mode cuối cùng (SVC) là mode kernel sẽ chạy:
+
+```
+Trước boot                 Sau cps #0x11+ldr        ...sau cps #0x13+ldr (cuối)
+─────────────────          ─────────────────────    ──────────────────────────
+Mode hiện tại: ?           Mode hiện tại: FIQ       Mode hiện tại: SVC ✓
+Đang chạy: rom/qemu        Đang chạy: start.S       Đang chạy: start.S → bl kmain
+
+Banked SPs:                Banked SPs:              Banked SPs:
+  SP_fiq: ???                SP_fiq: _fiq_top  ✓      SP_fiq: _fiq_top  ✓
+  SP_irq: ???                SP_irq: ???              SP_irq: _irq_top  ✓
+  SP_abt: ???                SP_abt: ???              SP_abt: _abt_top  ✓
+  SP_und: ???                SP_und: ???              SP_und: _und_top  ✓
+  SP_svc: ???                SP_svc: ???              SP_svc: _svc_top  ✓
+
+C code:                    C code:                  C code:
+  ✗ không gọi được           ✗ chưa gọi được          ✓ gọi kmain được
+  (chưa có stack)            (vẫn ở FIQ, SVC          (đang ở SVC, SVC stack
+                              chưa setup)              đã set, all banked OK)
+```
+
+3 điểm quan trọng:
+
+- **Banked SP độc lập** — `ldr sp, =X` ở FIQ mode KHÔNG ảnh hưởng SP_svc. Đó là vì sao phải
+  setup từng mode một, không thể set 1 lần xong.
+- **`cps #0x13` PHẢI là cuối cùng** — sau lệnh này CPU ở SVC mode, `bl kmain` sẽ chạy C code
+  trên SVC stack (8 KB). Nếu mode cuối là UND/ABT, kmain chạy với stack 1 KB → overflow nhanh.
+- **Mặt khác, sao phải set SP cho IRQ/ABT/UND/FIQ luôn?** — vì sau này (Chapter 02 trở đi),
+  exception có thể fire bất kỳ lúc nào. Khi đó CPU tự đổi sang IRQ/ABT/UND mode → dùng
+  banked SP tương ứng → nếu chưa set thì crash. Setup sẵn từ boot là bước phòng thủ.
+
+### Boot end-to-end
+
+```mermaid
+sequenceDiagram
+    participant ROM as ROM/QEMU loader
+    participant Start as start.S
+    participant UART
+    participant kmain
+
+    ROM->>Start: PC ← _start
+    Note over Start: cpsid if<br/>(mask IRQ + FIQ)
+    Note over Start: cps→FIQ, ldr sp<br/>cps→IRQ, ldr sp<br/>cps→ABT, ldr sp<br/>cps→UND, ldr sp<br/>cps→SVC, ldr sp
+    Note over Start: zero BSS<br/>(loop _bss_start → _bss_end)
+    Start->>kmain: bl kmain
+    kmain->>UART: uart_init()
+    kmain->>UART: uart_printf("RingNova...")
+    kmain->>UART: in boot log<br/>(.text/.data/.bss/CPSR)
+    Note over kmain: for(;;) — idle loop
+```
+
+Reader chỉ cần nhìn diagram là biết: từ ROM → start.S setup môi trường → kmain init UART
+→ in log. Không cần hiểu chi tiết instruction.
 
 ---
 
@@ -374,69 +489,6 @@ stack OK (function call thành công), BSS OK (linker symbols đúng), UART OK (
 
 `read_cpsr()` dùng inline assembly để đọc CPSR register — verify CPU đang ở SVC mode (0x13)
 và IRQ vẫn masked.
-
----
-
-## Gotcha
-
-### 1. Quên mask IRQ trước setup stacks
-
-Nếu hardware nào đó assert IRQ line (timer từ lần boot trước chưa clear), CPU nhảy
-vào IRQ handler ngay. Lúc đó SP_irq chưa set → push vào rác → crash.
-
-**Triệu chứng:** boot không in được gì, hoặc crash ngẫu nhiên (tùy trạng thái hardware).
-Khó debug vì UART chưa init.
-
-**Fix:** `cpsid if` phải là instruction đầu tiên.
-
-### 2. SVC không phải mode cuối cùng
-
-Nếu setup stacks xong mà quên `cps #0x13` (quay lại SVC):
-
-```
-cps #0x1B          ← đang ở UND mode
-ldr sp, =_und_stack_top
-                   ← QUÊN cps #0x13
-bl  kmain          ← kmain chạy ở UND mode, dùng UND stack (1 KB!)
-```
-
-`kmain` chạy ở mode sai, dùng stack sai (1 KB thay vì 8 KB). Một function call sâu
-vài cấp → stack overflow → ghi đè data → bug ngẫu nhiên.
-
-**Triệu chứng:** boot có vẻ OK, nhưng crash sau vài function call. CPSR mode bits
-không phải 0x13.
-
-**Fix:** SVC mode `cps #0x13` luôn là mode cuối cùng trong chuỗi setup.
-
-### 3. .text.start không đứng đầu .text
-
-Linker script phải đặt `.text.start` section trước mọi `.text*` khác:
-
-```
-.text : {
-    *(.text.start)      /* _start PHẢI ở đây */
-    *(.text*)
-}
-```
-
-Nếu đảo thứ tự hoặc thiếu rule → `_start` nằm giữa file → QEMU/SPL nhảy đến
-address đầu tiên → chạy vào function khác (có thể là `uart_init` hay `kmain`) →
-crash hoặc hành vi bất ngờ.
-
-**Triệu chứng:** boot không chạy, hoặc chạy vào function ngẫu nhiên.
-
-### 4. UART double CR/LF
-
-`uart_putc('\n')` tự thêm `'\r'` trước (auto CR/LF). Nếu caller cũng viết `"\r\n"`:
-
-```c
-uart_puts("hello\r\n");   /* caller thêm \r */
-/* uart_putc('\r') gặp '\r' → in \r (không thêm gì)
-   uart_putc('\n') → thêm \r → in \r\n
-   Kết quả: hello\r\r\n → terminal hiển thị blank line thừa */
-```
-
-**Fix:** caller chỉ dùng `"\n"`. Driver tự lo `"\r\n"`.
 
 ---
 

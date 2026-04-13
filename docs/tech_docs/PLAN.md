@@ -24,28 +24,45 @@
    Đúng: "...đặt phần cứng giữa CPU và RAM, tra bảng mỗi lần truy cập. Phần cứng đó gọi là **MMU**."
 3. **Tại sao trước, như thế nào sau** — mỗi đoạn code phải trả lời được "tại sao viết thế"
    trước khi nói "code này làm gì".
-4. **Nếu sai thì sao** — mô tả triệu chứng khi làm sai. Giúp người đọc hiểu sâu hơn và
-   biết debug khi gặp vấn đề tương tự.
-5. **QEMU và BBB viết chung** — nội dung chính viết chung, chỗ nào khác nhau thì ghi rõ
+4. **QEMU và BBB viết chung** — nội dung chính viết chung, chỗ nào khác nhau thì ghi rõ
    cả hai platform. Không tách thành 2 docs riêng.
+5. **Diagram là bắt buộc, không phải trang trí** — mỗi chapter ít nhất 1 sơ đồ "Đã xây dựng
+   đến đâu" (module stack + flow khởi động) và 1–2 diagram trong "Cách hoạt động". Reader
+   phải nhìn được bức tranh tổng quan và cơ chế vận hành qua hình, không phải qua chữ.
 6. **Diagram inline trong markdown** — không tách file riêng, không link ảnh ngoài.
-   Dùng text diagram (ASCII/box-drawing) khi cần thể hiện layout, memory map, struct.
-   Dùng mermaid khi cần thể hiện flow, sequence, state transition.
-   Chọn cách nào rõ hơn cho từng trường hợp — không ép tất cả vào 1 format.
+   Dùng text diagram (ASCII/box-drawing) cho layout tĩnh (memory map, struct, module stack).
+   Dùng mermaid cho flow/sequence/state transition. Độ sâu trung bình — reader hiểu trong
+   15 giây, không đi vào chi tiết instruction.
+7. **Không viết Gotcha riêng** — lỗi thường gặp không phải section độc lập. Nếu thật sự
+   non-obvious (insight về platform, trade-off kiến trúc), lồng vào Thiết kế/Implementation.
+   Nếu chỉ là chi tiết code → bỏ, reader sẽ gặp khi tự viết.
 
 ---
 
 ## Cấu trúc mỗi chapter
 
 | Phần | Mục đích |
-|------|----------|
+| --- | --- |
+| **Đã xây dựng đến đâu** | Sơ đồ tổng quan system sau chapter này. Module mới trong chapter được highlight (★). Kèm diagram flow khởi động cập nhật. Giúp reader biết mình đang ở đâu trong hành trình xây OS. |
 | **Nguyên lý** | Bản chất vấn đề OS — giải thích từ gốc cho người chưa biết gì. CPU hoạt động thế nào, tại sao mọi kernel đều phải giải quyết điều này. Không dùng thuật ngữ chưa giải thích. |
-| **Bối cảnh** | CPU đang ở trạng thái nào khi vào chapter này. Cái gì đã có từ chapter trước, cái gì chưa. Người đọc biết mình đang ở đâu trong hành trình. |
+| **Bối cảnh** | CPU đang ở trạng thái nào khi vào chapter này. Cái gì đã có từ chapter trước, cái gì chưa. |
 | **Vấn đề** | Lỗ hổng cụ thể nếu không giải quyết ở bước này. Hậu quả thật, không trừu tượng. |
-| **Thiết kế** | Quyết định kiến trúc và trade-off. Chọn gì, bỏ gì, tại sao. Có cách nào khác không, tại sao không chọn. Diagram khi cần. |
-| **Implementation** | Code thật từ project, giải thích từng block quan trọng — tại sao viết thế, không làm thì sao. Không paste cả file, chỉ phần cốt lõi. |
-| **Gotcha** | Những chỗ dễ sai, triệu chứng khi sai, tại sao sai. |
+| **Thiết kế** | Quyết định kiến trúc và trade-off. Chọn gì, bỏ gì, tại sao. Có cách nào khác không, tại sao không chọn. |
+| **Cách hoạt động** | 1–3 diagram mô tả cơ chế vận hành — lifecycle, mode transition, data flow. Dừng ở mức "cái gì → cái gì → cái gì", không đi vào bit register hay opcode. Mermaid cho flow/sequence, ASCII cho snapshot tĩnh. |
+| **Implementation** | Code thật từ project, chỉ giữ phần cốt lõi. Nếu nhiều file/hàm có cùng pattern, show 1 ví dụ rồi nói "các cái còn lại cùng pattern". Link đến file gốc thay vì paste toàn bộ. |
+| **Testing** | (Khi áp dụng được) — bảng ngắn: test gì / cách trigger / kết quả. Không paste code test đầy đủ. |
 | **Liên kết** | File nào trong code, phụ thuộc chapter nào, chapter tiếp là gì. |
+
+**Nguyên tắc diagrams:**
+
+- **1–3 diagram mỗi chapter**, không hơn — quá nhiều = loãng
+- **Độ sâu trung bình** — reader nhìn 15 giây là hiểu flow, không đi vào chi tiết instruction
+- **Mermaid** khi có chuỗi sự kiện theo thời gian (sequence, flow có branch, state transition)
+- **ASCII text** khi là snapshot tĩnh (memory layout, stack state, module stack)
+- **Chọn format rõ hơn** cho từng trường hợp — không ép tất cả vào 1 format
+
+**Không viết Gotcha section** — những chỗ dễ sai lồng vào Thiết kế hoặc Implementation nếu
+thật sự non-obvious. Phần lớn gotcha là chi tiết code, không phải insight kiến trúc → bỏ.
 
 ---
 
@@ -179,12 +196,6 @@ docs/tech_docs/
   khi system chưa ổn định.
 - `kmain` boot log: platform, memory layout, CPSR state.
 
-#### Gotcha
-- Quên mask IRQ trước setup stacks → IRQ fire khi SP chưa set → crash không dấu vết.
-- `cps #0x13` phải là mode cuối cùng → kmain chạy ở SVC. Quên → stack sai → crash.
-- UART double CR/LF nếu cả driver và caller đều thêm \r.
-- Linker script `*(.text.start)` phải đứng đầu `.text` → đảm bảo `_start` ở đúng load address.
-
 #### Liên kết
 - Files: `kernel/arch/arm/boot/start.S`, `kernel/main.c`, `kernel/drivers/uart/`,
   `kernel/include/board.h`, `kernel/linker/kernel_*.ld`
@@ -229,13 +240,6 @@ docs/tech_docs/
 - SVC stub: placeholder cho syscall (chapter 07).
 - IRQ stub: placeholder cho timer interrupt (chapter 04).
 - Set VBAR: `mcr p15, 0, r0, c12, c0, 0`.
-
-#### Gotcha
-- LR trong Data Abort trỏ đến instruction SAU instruction gây fault — phải `sub lr, #8`.
-  IRQ thì `sub lr, #4`. Mỗi exception type khác nhau.
-- Quên set VBAR → CPU dùng default 0x00000000 → nếu vùng đó là RAM, có thể chạy data
-  như code → hành vi không đoán được.
-- Handler không được dùng stack nhiều — exception stack nhỏ, shared.
 
 #### Liên kết
 - Files: `kernel/arch/arm/exception/vector_table.S`, `kernel/arch/arm/exception/handlers.S`,
@@ -282,12 +286,6 @@ docs/tech_docs/
 - Trampoline: ldr pc vào VA cao → xóa identity map → flush TLB.
 - Reload stack pointers sang VA.
 
-#### Gotcha
-- Quên DSB trước enable MMU → page table write chưa đến RAM → map sai → crash ngẫu nhiên.
-- Quên identity map → enable MMU → instruction tiếp theo fetch từ PA → unmapped → fault ngay.
-- Quên map peripheral → uart_printf sau MMU = fault. Mất debug output đúng lúc cần nhất.
-- Xóa identity map trước trampoline → PC vẫn ở VA thấp → fault.
-
 #### Liên kết
 - Files: `kernel/arch/arm/mmu/`, `kernel/include/board.h` (address constants)
 - Phụ thuộc: Chapter 02 (exception handler phải có trước để debug MMU fault)
@@ -331,11 +329,6 @@ docs/tech_docs/
 - Timer driver: config period, start, stop, clear interrupt.
 - IRQ handler assembly: trampoline pattern.
 - Timer callback: set flag, chưa reschedule (chapter 06 mới dùng).
-
-#### Gotcha
-- Quên EOI (End of Interrupt) → INTC nghĩ interrupt chưa xử lý → không fire lần tiếp → timer chết.
-- Timer period tính sai → tick quá nhanh hoặc quá chậm. In tick counter ra UART để verify.
-- IRQ handler corrupt registers mà interrupted code đang dùng → save/restore đủ registers.
 
 #### Liên kết
 - Files: `kernel/drivers/timer/`, `kernel/drivers/intc/`, `kernel/arch/arm/exception/`
@@ -388,14 +381,6 @@ docs/tech_docs/
   restore r0-r12 + LR + SPSR từ PCB B → movs pc, lr (return + restore CPSR).
 - Process init trong kmain: tạo 3 process, nhảy vào process đầu tiên.
 
-#### Gotcha
-- Context switch quên save/restore 1 register → process B dùng giá trị rác của A →
-  bug cực khó debug vì chỉ xảy ra sau switch.
-- Quên flush TLB sau swap TTBR0 → CPU dùng TLB entry cũ → process B truy cập memory
-  của A → corruption xuyên process.
-- Initial CPSR phải set User mode (0x10) + IRQ enabled. Nếu quên enable IRQ →
-  process chạy mà timer không fire → không bao giờ switch → 1 process chiếm CPU mãi.
-
 #### Liên kết
 - Files: `kernel/process/`, `kernel/arch/arm/context_switch.S`
 - Phụ thuộc: Chapter 03 (page table), Chapter 04 (timer interrupt)
@@ -434,12 +419,6 @@ docs/tech_docs/
 - scheduler_tick(): gọi từ timer IRQ, set flag.
 - schedule(): chọn next READY process, gọi context_switch().
 - Tích hợp vào IRQ return path: check flag → schedule() → return to new process.
-
-#### Gotcha
-- Schedule chọn chính process đang chạy → context switch "sang chính mình" → lãng phí
-  nhưng không crash. Nên check và skip.
-- Tất cả process BLOCKED/DEAD → không ai READY → schedule() phải handle (idle loop).
-- Scheduler chạy khi IRQ disabled — nếu quên, timer fire trong scheduler → re-enter → crash.
 
 #### Liên kết
 - Files: `kernel/sched/`
@@ -485,13 +464,6 @@ docs/tech_docs/
 - sys_yield(): set state = READY → schedule().
 - User-side wrapper: inline asm, `svc #0`, `mov r7, #SYS_WRITE`.
 
-#### Gotcha
-- User truyền pointer 0xC0000000 (kernel space) cho sys_write() → nếu kernel deref →
-  in kernel memory ra UART → info leak. Phải validate trước.
-- SVC handler phải save/restore đúng registers — user process expect r4-r11 không đổi
-  sau syscall (callee-saved theo AAPCS).
-- Syscall number ngoài range → return lỗi, không index vào bảng (out of bounds).
-
 #### Liên kết
 - Files: `kernel/syscall/`, `kernel/arch/arm/exception/` (SVC handler)
 - Phụ thuộc: Chapter 05 (process), Chapter 06 (scheduler cho yield/exit)
@@ -534,13 +506,6 @@ docs/tech_docs/
 - counter.c: vòng lặp in số + yield.
 - Build: user/ Makefile riêng, output binary riêng per process.
 
-#### Gotcha
-- User stack phải nằm trong user VA range — nếu crt0 set SP sai → fault ngay instruction đầu.
-- main() return mà không gọi exit → PC rơi vào rác → Undefined exception.
-  crt0 phải gọi exit() sau main().
-- User code include header kernel → accident dùng kernel-internal function → link error
-  hoặc tệ hơn: gọi vào kernel address → fault.
-
 #### Liên kết
 - Files: `user/`, `user/lib/`, `user/programs/`
 - Phụ thuộc: Chapter 07 (syscall interface)
@@ -581,13 +546,6 @@ docs/tech_docs/
 - User-side: shm_write(), shm_read() — thin wrappers trên shared memory pointer.
 - shm_demo.c: poll shared memory, in dữ liệu nhận được.
 
-#### Gotcha
-- Quên flush TLB sau add entry → process vẫn thấy Fault tại 0x41000000 → "shm_map trả OK
-  nhưng access crash".
-- Race condition: writer đang ghi, reader đọc giữa chừng → data inconsistent.
-  Protocol flag giảm thiểu nhưng không loại bỏ hoàn toàn (không có mutex). Đủ cho demo.
-- Process 2 gọi shm_map → kernel phải từ chối hoặc handle — đừng để crash.
-
 #### Liên kết
 - Files: `kernel/ipc/`, syscall handler
 - Phụ thuộc: Chapter 07 (syscall), Chapter 03 (page table manipulation)
@@ -626,13 +584,6 @@ docs/tech_docs/
 - shell.c: prompt loop, read line, parse command, dispatch.
 - String parsing: strcmp command name, atoi cho pid argument.
 - Tích hợp sys_read() blocking: UART RX interrupt → wake shell process.
-
-#### Gotcha
-- sys_read() blocking mà UART RX interrupt chưa implement → shell block vĩnh viễn,
-  system trông như đứng. Phải implement UART RX IRQ trước.
-- Shell buffer overflow: user gõ quá dài → ghi ngoài buffer. Phải giới hạn input length.
-- kill shell (process 2) → không còn giao diện → system vẫn chạy nhưng không tương tác được.
-  Đây là hành vi đúng, nhưng nên cảnh báo user.
 
 #### Liên kết
 - Files: `user/programs/shell.c`
