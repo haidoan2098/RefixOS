@@ -64,13 +64,42 @@ void kmain(void)
                 (cpsr & (1U << 6)) ? "masked" : "on");
     uart_printf("[BOOT] MMU      : off\n");
 
-    /* ---- Phase 2: Exception handling ---- */
     exception_init();
 
     /* Test SVC — should print syscall number and return */
     uart_printf("[TEST] triggering SVC #42...\n");
     __asm__ volatile("svc #42");
     uart_printf("[TEST] SVC returned OK\n");
+
+    /* Uncomment ONE test at a time — each one halts the system */
+#define TEST_NONE       0
+#define TEST_DATA_ABORT 1
+#define TEST_UNDEFINED  2
+
+#define EXCEPTION_TEST  TEST_NONE
+
+#if EXCEPTION_TEST == TEST_DATA_ABORT
+    /* Test Data Abort — enable alignment check then do unaligned
+     * 32-bit read. QEMU doesn't fault on unmapped PA reads, but
+     * SCTLR.A=1 + unaligned access triggers Data Abort reliably. */
+    uart_printf("[TEST] triggering Data Abort (unaligned access)...\n");
+    {
+        /* Enable alignment checking: SCTLR.A (bit 1) = 1 */
+        uint32_t sctlr;
+        __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+        sctlr |= (1U << 1);
+        __asm__ volatile("mcr p15, 0, %0, c1, c0, 0" :: "r"(sctlr));
+        __asm__ volatile("isb");
+        /* Unaligned 32-bit read → Data Abort */
+        volatile uint32_t x = *((volatile uint32_t *)0x70100001U);
+        (void)x;
+    }
+#elif EXCEPTION_TEST == TEST_UNDEFINED
+    /* Test Undefined Instruction — execute an undefined opcode,
+     * should print PC + register dump then halt */
+    uart_printf("[TEST] triggering Undefined Instruction...\n");
+    __asm__ volatile(".word 0xE7F000F0");   /* permanently undefined */
+#endif
 
     uart_printf("[BOOT] boot complete — entering idle loop\n");
 

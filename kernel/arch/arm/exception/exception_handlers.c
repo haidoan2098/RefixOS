@@ -2,9 +2,9 @@
  * kernel/arch/arm/exception/exception_handlers.c — C-level
  * exception handlers
  *
- * Phase 2: all fault handlers are fatal — dump registers and
- * halt.  SVC handler prints the syscall number and returns.
- * IRQ handler is a stub (interrupts not enabled yet).
+ * All fault handlers are fatal — dump registers and halt.
+ * SVC handler prints the syscall number and returns.
+ * IRQ handler halts (interrupts not enabled yet).
  *
  * Dependencies: uart driver, exception.h
  * =========================================================== */
@@ -127,7 +127,7 @@ void handle_undefined(exception_context_t *ctx)
 }
 
 /* ===========================================================
- * SVC handler — Phase 2 stub, just prints syscall number
+ * SVC handler — prints syscall number and returns to caller
  *
  * The SVC number is encoded in the SVC instruction itself:
  *   ARM mode:   svc #N → bottom 24 bits of the instruction
@@ -140,12 +140,12 @@ void handle_svc(exception_context_t *ctx)
     uint32_t svc_instr = *((volatile uint32_t *)svc_addr);
     uint32_t svc_num = svc_instr & 0x00FFFFFFU;  /* ARM: bits [23:0] */
 
-    uart_printf("[SVC]   syscall #%u from PC=0x%08x (stub — Phase 5)\n",
+    uart_printf("[SVC]   syscall #%u from PC=0x%08x\n",
                 svc_num, svc_addr);
 }
 
 /* ===========================================================
- * IRQ handler — Phase 2 stub (interrupts not enabled)
+ * IRQ handler — interrupts not enabled, halts if triggered
  * =========================================================== */
 void handle_irq(exception_context_t *ctx)
 {

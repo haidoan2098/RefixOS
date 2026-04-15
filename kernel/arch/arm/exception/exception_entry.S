@@ -13,9 +13,9 @@
  *   [SP+4]  r0 .. [SP+52] r12
  *   [SP+56] lr  (adjusted return address)
  *
- * Phase 2: all faults are fatal (print + halt).
- *          SVC stub returns properly for testing.
- *          IRQ/FIQ stubs halt (interrupts not enabled yet).
+ * All fault handlers are fatal — dump registers and halt.
+ * SVC returns to caller after printing the syscall number.
+ * IRQ/FIQ halt (interrupts not enabled yet).
  *
  * Dependencies: exception_handlers.c (C handlers)
  * =========================================================== */
@@ -75,7 +75,6 @@ exception_entry_undef:
  *
  * LR_svc = return address (next instruction after SVC).
  * No LR adjustment needed.
- * Phase 2: prints syscall number, then returns to caller.
  * =========================================================== */
 exception_entry_svc:
     stmfd   sp!, {r0-r12, lr}      /* save on SVC stack */
@@ -91,8 +90,7 @@ exception_entry_svc:
 /* ===========================================================
  * IRQ — LR_irq = PC+4, subtract 4 to get interrupted instr
  *
- * Phase 2: IRQ is not enabled, this is a safety stub.
- * Phase 4 will implement proper IRQ dispatch here.
+ * IRQ is not enabled yet — halts if triggered unexpectedly.
  * =========================================================== */
 exception_entry_irq:
     sub     lr, lr, #4
