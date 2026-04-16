@@ -58,6 +58,8 @@ SECTIONS
     {
         . = ALIGN(8);
         _bss_start = .;
+        . = ALIGN(16384);    /* boot_pgd must be 16 KB aligned (TTBR0) */
+        *(.bss.pgd)          /* L1 translation table — 16 KB */
         *(.bss*)
         *(COMMON)
         . = ALIGN(8);

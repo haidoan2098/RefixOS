@@ -37,11 +37,14 @@ CFLAGS := -nostdlib -ffreestanding -nostartfiles \
 # Source files
 C_SRCS := kernel/main.c \
           kernel/drivers/uart/uart.c \
-          kernel/arch/arm/exception/exception_handlers.c
+          kernel/arch/arm/exception/exception_handlers.c \
+          kernel/arch/arm/mm/mmu.c \
+          kernel/arch/arm/mm/pgtable.c
 
 S_SRCS := kernel/arch/arm/boot/start.S \
           kernel/arch/arm/exception/vectors.S \
-          kernel/arch/arm/exception/exception_entry.S
+          kernel/arch/arm/exception/exception_entry.S \
+          kernel/arch/arm/mm/mmu_enable.S
 
 # Object files
 C_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_SRCS))
