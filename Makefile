@@ -37,6 +37,8 @@ CFLAGS := -nostdlib -ffreestanding -nostartfiles \
 # Source files
 C_SRCS := kernel/main.c \
           kernel/drivers/uart/uart.c \
+          kernel/drivers/intc/intc.c \
+          kernel/drivers/timer/timer.c \
           kernel/arch/arm/exception/exception_handlers.c \
           kernel/arch/arm/mm/mmu.c \
           kernel/arch/arm/mm/pgtable.c

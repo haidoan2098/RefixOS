@@ -88,19 +88,23 @@ exception_entry_svc:
     ldmfd   sp!, {r0-r12, pc}^     /* restore regs + return, SPSR→CPSR */
 
 /* ===========================================================
- * IRQ — LR_irq = PC+4, subtract 4 to get interrupted instr
+ * IRQ — LR_irq = interrupted_PC + 4
  *
- * IRQ is not enabled yet — halts if triggered unexpectedly.
+ * We park the IRQ-mode stack as a pure trampoline: srsdb pushes
+ * {LR_irq, SPSR_irq} directly onto the SVC stack, so all real
+ * work happens in SVC mode on the kernel stack.
+ *
+ * rfefd at the end pops the return PC and SPSR back atomically,
+ * restoring both mode and status.
  * =========================================================== */
 exception_entry_irq:
-    sub     lr, lr, #4
-    stmfd   sp!, {r0-r12, lr}
-    mrs     r0, spsr
-    stmfd   sp!, {r0}
-    mov     r0, sp
-    cps     #0x13
+    sub     lr, lr, #4              /* LR = interrupted instruction       */
+    srsdb   sp!, #0x13              /* push {LR_irq, SPSR_irq} on SVC stk */
+    cps     #0x13                   /* switch to SVC mode                 */
+    stmfd   sp!, {r0-r12, lr}      /* save GPRs + SVC LR                 */
     bl      handle_irq
-    b       .
+    ldmfd   sp!, {r0-r12, lr}      /* restore GPRs + SVC LR              */
+    rfefd   sp!                     /* pop PC + CPSR → return + unmask    */
 
 /* ===========================================================
  * FIQ — not used in RingNova, just halt

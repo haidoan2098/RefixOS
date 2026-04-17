@@ -35,9 +35,13 @@
    * Reference: ARM DDI 0271 (SP804 TRM)                        */
   #define TIMER0_BASE     0x10011000U
 
-  /* VIC — Vectored Interrupt Controller
-   * Reference: ARM DDI 0181 (PL190 TRM)                        */
-  #define VIC_BASE        0x10140000U
+  /* GIC v1 — realview-pb-a8 maps CPU interface then distributor.
+   * Reference: ARM IHI 0048 (GIC Architecture Specification)  */
+  #define GIC_CPU_BASE    0x1E000000U
+  #define GIC_DIST_BASE   0x1E001000U
+
+  /* SP804 is clocked at 1 MHz on realview-pb-a8 */
+  #define TIMER_CLK_HZ    1000000U
 
 /* ------------------------------------------------------------------ */
 /*  BeagleBone Black  AM335x                                           */
@@ -66,6 +70,13 @@
   /* INTC — Interrupt Controller
    * Reference: AM335x TRM §6                                   */
   #define INTC_BASE       0x48200000U
+
+  /* CM_PER — Clock Module for peripherals (DMTIMER2 gate)
+   * Reference: AM335x TRM §8                                   */
+  #define CM_PER_BASE     0x44E00000U
+
+  /* DMTIMER2 fed from CLK_M_OSC = 24 MHz */
+  #define TIMER_CLK_HZ    24000000U
 
 #else
   #error "Unknown PLATFORM — define PLATFORM_QEMU or PLATFORM_BBB"

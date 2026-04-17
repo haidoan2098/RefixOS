@@ -62,9 +62,10 @@ void mmu_build_boot_pgd(void)
     /* 3. Peripheral regions — identity mapped, strongly-ordered, XN. */
 #ifdef PLATFORM_QEMU
     /* realview-pb-a8:
-     *   UART0 @ 0x10009000, SP804 @ 0x10011000, VIC @ 0x10140000
-     *   All within 0x10000000 .. 0x10200000 — 2 sections cover them. */
+     *   UART0 @ 0x10009000, SP804 @ 0x10011000 — 2 sections
+     *   GIC   @ 0x1E000000 (CPU iface + distributor)         — 1 section */
     map_range(0x10000000U, 0x10000000U, 2U << 20, PDE_DEVICE);
+    map_range(0x1E000000U, 0x1E000000U, 1U << 20, PDE_DEVICE);
 #elif defined(PLATFORM_BBB)
     /* AM335x:
      *   L4_WKUP  @ 0x44E00000 (UART0, WDT, CM_PER)       — 1 MB

@@ -11,8 +11,10 @@
  * =========================================================== */
 
 #include "drivers/uart/uart.h"
+#include "drivers/timer/timer.h"
 #include "include/board.h"
 #include "include/exception.h"
+#include "include/irq.h"
 #include "include/mmu.h"
 
 /* Linker-provided symbols */
@@ -122,6 +124,29 @@ static void run_boot_tests(void)
         pass++;
     }
 
+    /* T6 — timer IRQ delivery verified by spinning until several ticks
+     * are observed. Bail out after a generous iteration cap so a dead
+     * timer fails fast instead of hanging the boot tests. */
+    {
+        const uint32_t TARGET = 5;
+        const uint32_t SPIN_MAX = 200000000U;
+        uint32_t t0 = timer_get_ticks();
+        uint32_t delta = 0;
+        for (volatile uint32_t i = 0; i < SPIN_MAX; i++) {
+            delta = timer_get_ticks() - t0;
+            if (delta >= TARGET)
+                break;
+        }
+        if (delta >= TARGET) {
+            uart_printf("[TEST] [PASS] T6 timer ticks: %u observed\n", delta);
+            pass++;
+        } else {
+            uart_printf("[TEST] [FAIL] T6 ticks=%u (target %u)\n",
+                        delta, TARGET);
+            fail++;
+        }
+    }
+
     uart_printf("[TEST] ========== %d passed, %d failed ==========\n\n",
                 pass, fail);
 }
@@ -159,6 +184,13 @@ void kmain(void)
     mmu_init();
 
     exception_init();
+
+    irq_init();
+    timer_init(10000);                      /* 10 ms tick */
+    irq_register(IRQ_TIMER, timer_irq);
+    irq_enable(IRQ_TIMER);
+    irq_cpu_enable();
+    uart_printf("[IRQ]   CPU IRQ enabled (CPSR.I=0)\n");
 
     run_boot_tests();
 

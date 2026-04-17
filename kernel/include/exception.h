@@ -29,7 +29,7 @@ void handle_data_abort(exception_context_t *ctx);
 void handle_prefetch_abort(exception_context_t *ctx);
 void handle_undefined(exception_context_t *ctx);
 void handle_svc(exception_context_t *ctx);
-void handle_irq(exception_context_t *ctx);
+void handle_irq(void);
 
 /* -----------------------------------------------------------
  * VBAR setup — called from kmain after UART init

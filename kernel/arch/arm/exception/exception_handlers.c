@@ -10,6 +10,7 @@
  * =========================================================== */
 
 #include "exception.h"
+#include "irq.h"
 #include "uart/uart.h"
 
 /* ARM mode names indexed by CPSR[4:0] */
@@ -145,13 +146,12 @@ void handle_svc(exception_context_t *ctx)
 }
 
 /* ===========================================================
- * IRQ handler — interrupts not enabled, halts if triggered
+ * IRQ handler — called from exception_entry_irq after srsdb to
+ * SVC stack. Defers to the INTC dispatcher in drivers/intc.
  * =========================================================== */
-void handle_irq(exception_context_t *ctx)
+void handle_irq(void)
 {
-    uart_printf("\n[PANIC] *** UNEXPECTED IRQ ***\n");
-    dump_context(ctx);
-    halt_forever();
+    irq_dispatch();
 }
 
 /* ===========================================================
