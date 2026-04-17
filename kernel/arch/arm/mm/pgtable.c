@@ -77,3 +77,47 @@ void mmu_build_boot_pgd(void)
     /* Entry 0 (VA 0x00000000 .. 0x000FFFFF) is left as FAULT:
      * null-pointer dereference raises Data Abort. */
 }
+
+/* ============================================================
+ * pgtable_build_for_proc — populate a per-process L1 table
+ *
+ * Mirrors kernel high-half + peripherals from boot_pgd, then
+ * installs one user section at VA 0x40000000 → user_pa.
+ *
+ * Deliberately does NOT copy the identity map of RAM: after a
+ * future context switch to this pgd, only VAs 0x40000000 (user),
+ * 0xC0000000+ (kernel high), peripherals, and 0xFFFF0000 (vectors,
+ * if present in boot_pgd) resolve. Kernel code is expected to
+ * already be executing at its high-VA alias before TTBR0 swap.
+ * ============================================================ */
+void pgtable_build_for_proc(uint32_t *pgd, uint32_t user_pa)
+{
+    const uint32_t ident_lo = RAM_BASE >> 20;
+    const uint32_t ident_hi = (RAM_BASE + RAM_SIZE) >> 20;
+
+    /* 1. Zero all 4096 entries → everything FAULT by default */
+    for (uint32_t i = 0; i < PGD_ENTRIES; i++)
+        pgd[i] = 0;
+
+    /* 2. Copy every non-zero entry from boot_pgd EXCEPT the
+     *    identity map of RAM. This pulls in:
+     *       - kernel high-half alias @ 0xC00+
+     *       - peripherals (QEMU 0x100/0x1E0, BBB 0x44E/0x480..0x48F)
+     *    Order-independent — boot_pgd is already built. */
+    for (uint32_t i = 0; i < PGD_ENTRIES; i++) {
+        if (boot_pgd[i] == 0)
+            continue;
+        if (i >= ident_lo && i < ident_hi)
+            continue;                         /* skip identity RAM */
+        pgd[i] = boot_pgd[i];
+    }
+
+    /* 3. Install user section at VA 0x40000000 → user_pa.
+     *    User RW + executable. Each process calls with a different
+     *    user_pa so physical isolation is real. */
+    pgd[USER_VIRT_BASE >> 20] = (user_pa & 0xFFF00000U) | PDE_USER_TEXT;
+
+    /* Ensure writes are visible before TLB/pagetable consumers see
+     * the new table (even though TTBR0 swap happens elsewhere). */
+    __asm__ volatile("dsb" ::: "memory");
+}

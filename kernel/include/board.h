@@ -82,4 +82,23 @@
   #error "Unknown PLATFORM — define PLATFORM_QEMU or PLATFORM_BBB"
 #endif
 
+/* ------------------------------------------------------------------ */
+/*  Process / user-space layout — platform-independent                 */
+/* ------------------------------------------------------------------ */
+
+#define NUM_PROCESSES       3U
+#define KSTACK_SIZE         8192U
+
+#define USER_VIRT_BASE      0x40000000U
+#define USER_REGION_SIZE    0x00100000U                       /* 1 MB */
+#define USER_STACK_TOP      (USER_VIRT_BASE + USER_REGION_SIZE)
+
+/* Per-process user PA slots — see docs/memory-architecture.md §1:
+ *   proc 0 → RAM_BASE + 0x200000
+ *   proc 1 → RAM_BASE + 0x300000
+ *   proc 2 → RAM_BASE + 0x400000
+ * Each slot is 1 MB, matches one section descriptor. */
+#define USER_PHYS_BASE      (RAM_BASE + 0x00200000U)
+#define USER_PHYS_STRIDE    0x00100000U
+
 #endif /* KERNEL_BOARD_H */

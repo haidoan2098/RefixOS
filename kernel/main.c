@@ -16,6 +16,7 @@
 #include "include/exception.h"
 #include "include/irq.h"
 #include "include/mmu.h"
+#include "include/proc.h"
 
 /* Linker-provided symbols */
 extern uint32_t _text_start, _text_end;
@@ -147,6 +148,109 @@ static void run_boot_tests(void)
         }
     }
 
+    /* T7 — PCB array populated correctly */
+    {
+        int ok = 1;
+        for (uint32_t i = 0; i < NUM_PROCESSES; i++) {
+            process_t *p = &processes[i];
+            uint32_t expect_upa = USER_PHYS_BASE + i * USER_PHYS_STRIDE;
+            if (p->pid != i || p->state != TASK_READY || p->name == 0
+                || p->pgd == 0 || ((uint32_t)p->pgd & 0x3FFFU) != 0
+                || p->user_phys_base != expect_upa) {
+                uart_printf("[TEST] [FAIL] T7 pid=%u state=%u pgd=0x%08x "
+                            "upa=0x%08x (expect 0x%08x)\n",
+                            p->pid, p->state, (uint32_t)p->pgd,
+                            p->user_phys_base, expect_upa);
+                ok = 0;
+            }
+        }
+        if (ok) {
+            uart_printf("[TEST] [PASS] T7 PCB array (%u processes)\n",
+                        NUM_PROCESSES);
+            pass++;
+        } else {
+            fail++;
+        }
+    }
+
+    /* T8 — per-process L1 table mappings */
+    {
+        int ok = 1;
+        uint32_t seen_user_pde[NUM_PROCESSES];
+        for (uint32_t i = 0; i < NUM_PROCESSES; i++) {
+            process_t *p = &processes[i];
+            uint32_t pde_null = p->pgd[0];
+            uint32_t pde_user = p->pgd[USER_VIRT_BASE >> 20];
+            uint32_t pde_kern = p->pgd[VA_KERNEL_BASE >> 20];
+
+            uint32_t user_base = pde_user & 0xFFF00000U;
+            uint32_t is_section = (pde_user & 0x3U) == PDE_TYPE_SECTION;
+            uint32_t ap_user_rw = (pde_user & (PDE_AP0 | PDE_AP1))
+                                  == (PDE_AP0 | PDE_AP1);
+            uint32_t xn_clear  = (pde_user & PDE_XN) == 0;
+            uint32_t ap2_clear = (pde_user & PDE_AP2) == 0;
+
+            if (pde_null != 0 || !is_section
+                || user_base != (p->user_phys_base & 0xFFF00000U)
+                || !ap_user_rw || !xn_clear || !ap2_clear
+                || pde_kern != boot_pgd[VA_KERNEL_BASE >> 20]) {
+                uart_printf("[TEST] [FAIL] T8 pid=%u null=0x%08x "
+                            "user=0x%08x kern=0x%08x (boot=0x%08x)\n",
+                            p->pid, pde_null, pde_user, pde_kern,
+                            boot_pgd[VA_KERNEL_BASE >> 20]);
+                ok = 0;
+            }
+            seen_user_pde[i] = pde_user;
+        }
+        /* All 3 user PDEs must differ — proves per-process PA isolation */
+        if (seen_user_pde[0] == seen_user_pde[1]
+            || seen_user_pde[1] == seen_user_pde[2]
+            || seen_user_pde[0] == seen_user_pde[2]) {
+            uart_printf("[TEST] [FAIL] T8 user PDEs not distinct: "
+                        "%08x %08x %08x\n",
+                        seen_user_pde[0], seen_user_pde[1], seen_user_pde[2]);
+            ok = 0;
+        }
+        if (ok) {
+            uart_printf("[TEST] [PASS] T8 L1 mappings (null+user+kern OK, "
+                        "3 distinct user PAs)\n");
+            pass++;
+        } else {
+            fail++;
+        }
+    }
+
+    /* T9 — initial kernel stack frame is laid out for user-mode entry */
+    {
+        int ok = 1;
+        for (uint32_t i = 0; i < NUM_PROCESSES; i++) {
+            process_t *p = &processes[i];
+            uint32_t *frame = (uint32_t *)p->ctx.sp_svc;
+            for (uint32_t r = 0; r < 13 && ok; r++) {
+                if (frame[r] != 0) {
+                    uart_printf("[TEST] [FAIL] T9 pid=%u frame[%u]=0x%08x\n",
+                                p->pid, r, frame[r]);
+                    ok = 0;
+                }
+            }
+            if (frame[13] != USER_VIRT_BASE
+                || p->ctx.spsr != 0x10U
+                || p->ctx.sp_usr != USER_STACK_TOP) {
+                uart_printf("[TEST] [FAIL] T9 pid=%u pc=0x%08x spsr=0x%08x "
+                            "sp_usr=0x%08x\n",
+                            p->pid, frame[13], p->ctx.spsr, p->ctx.sp_usr);
+                ok = 0;
+            }
+        }
+        if (ok) {
+            uart_printf("[TEST] [PASS] T9 initial stack frames "
+                        "(pc=USER_VIRT_BASE, spsr=0x10)\n");
+            pass++;
+        } else {
+            fail++;
+        }
+    }
+
     uart_printf("[TEST] ========== %d passed, %d failed ==========\n\n",
                 pass, fail);
 }
@@ -191,6 +295,8 @@ void kmain(void)
     irq_enable(IRQ_TIMER);
     irq_cpu_enable();
     uart_printf("[IRQ]   CPU IRQ enabled (CPSR.I=0)\n");
+
+    process_init_all();
 
     run_boot_tests();
 

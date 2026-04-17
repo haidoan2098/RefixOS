@@ -44,6 +44,10 @@
 #define PDE_DEVICE          (PDE_TYPE_SECTION | PDE_AP_KERN_RW \
                              | PDE_DOMAIN(0) | PDE_XN)
 
+/* User code + data + stack: cacheable, kernel+user RW, executable */
+#define PDE_USER_TEXT       (PDE_TYPE_SECTION | PDE_C | PDE_B \
+                             | PDE_AP_KERN_USER_RW | PDE_DOMAIN(0))
+
 /* Page table dimensions */
 #define PGD_ENTRIES         4096U
 #define PGD_SIZE            (PGD_ENTRIES * 4U)  /* 16 KB */
@@ -58,5 +62,12 @@ void     mmu_build_boot_pgd(void);
 void     mmu_enable(uint32_t pgd_pa);   /* implemented in assembly */
 uint32_t mmu_read_sctlr(void);
 uint32_t mmu_read_ttbr0(void);
+
+/* Populate a per-process L1 table:
+ *   - mirror kernel high-half + peripherals from boot_pgd
+ *   - install 1 MB user section at VA USER_VIRT_BASE → user_pa
+ *   - leave NULL guard (entry 0) as FAULT
+ * Caller owns the 16 KB-aligned pgd buffer. */
+void     pgtable_build_for_proc(uint32_t *pgd, uint32_t user_pa);
 
 #endif /* KERNEL_MMU_H */

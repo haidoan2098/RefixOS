@@ -41,12 +41,14 @@ C_SRCS := kernel/main.c \
           kernel/drivers/timer/timer.c \
           kernel/arch/arm/exception/exception_handlers.c \
           kernel/arch/arm/mm/mmu.c \
-          kernel/arch/arm/mm/pgtable.c
+          kernel/arch/arm/mm/pgtable.c \
+          kernel/proc/process.c
 
 S_SRCS := kernel/arch/arm/boot/start.S \
           kernel/arch/arm/exception/vectors.S \
           kernel/arch/arm/exception/exception_entry.S \
-          kernel/arch/arm/mm/mmu_enable.S
+          kernel/arch/arm/mm/mmu_enable.S \
+          kernel/arch/arm/proc/user_stub.S
 
 # Object files
 C_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_SRCS))

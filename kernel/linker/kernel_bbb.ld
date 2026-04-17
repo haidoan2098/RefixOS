@@ -34,6 +34,18 @@ SECTIONS
     } > RAM
 
     /* -------------------------------------------------------
+     * .user_stub — inline user-mode code template (phase 1 of
+     * process management). process_init_all() memcpy's these
+     * bytes into each process's 1 MB user PA slot.
+     * ------------------------------------------------------- */
+    .user_stub :
+    {
+        . = ALIGN(4);
+        KEEP(*(.user_stub))
+        . = ALIGN(4);
+    } > RAM
+
+    /* -------------------------------------------------------
      * .data — initialised data
      * ------------------------------------------------------- */
     .data :
@@ -56,6 +68,8 @@ SECTIONS
         _bss_start = .;
         . = ALIGN(16384);    /* boot_pgd must be 16 KB aligned (TTBR0) */
         *(.bss.pgd)          /* L1 translation table — 16 KB */
+        . = ALIGN(16384);    /* per-process L1 tables — 16 KB each */
+        *(.bss.proc_pgd)     /* proc_pgd[NUM_PROCESSES][4096] */
         *(.bss*)
         *(COMMON)
         . = ALIGN(8);
