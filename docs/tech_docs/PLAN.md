@@ -76,12 +76,10 @@ docs/tech_docs/
 ├── 02_exceptions/
 ├── 03_mmu/
 ├── 04_interrupts/
-├── 05_process/
-├── 06_scheduler/
-├── 07_syscall/
-├── 08_userspace/
-├── 09_ipc/
-└── 10_shell/
+├── 05_process/          ← PCB + context switch + scheduler
+├── 06_syscall/
+├── 07_userspace/
+└── 08_shell/
 ```
 
 ---
@@ -357,7 +355,7 @@ docs/tech_docs/
 - Chưa có process nào. Kernel chạy trực tiếp trong kmain.
 
 #### Vấn đề
-- Chỉ chạy được 1 chương trình. Muốn chạy 3 (counter, shm_demo, shell) cùng lúc.
+- Chỉ chạy được 1 chương trình. Muốn chạy 3 (counter, runaway, shell) cùng lúc.
 - Cần cấu trúc dữ liệu lưu trạng thái mỗi chương trình.
 - Cần cơ chế swap trạng thái — phải viết bằng assembly vì C không access được banked registers.
 
@@ -454,7 +452,7 @@ docs/tech_docs/
 - Syscall table: array function pointers, index bằng syscall number.
 - Pointer validation: user pointer phải nằm trong 0x40000000–0x40FFFFFF.
   Pointer trỏ vào kernel space → return lỗi, không deref.
-- Danh sách syscall: write, read, exit, yield, getpid, ps, meminfo, kill, shm_map.
+- Danh sách syscall: write, read, exit, yield, getpid, ps, meminfo, kill.
 
 #### Implementation
 - SVC handler assembly: save context → extract syscall number → call C dispatcher.
@@ -496,7 +494,7 @@ docs/tech_docs/
 - crt0.S: setup user stack → bl main → mov r7, #SYS_EXIT → svc #0.
 - Syscall wrappers: write(), read(), exit(), yield(), getpid() — thin C functions.
 - Minimal libc: strlen, strcmp, memcpy, memset — chỉ những gì dùng thật.
-- 3 user programs: counter (in số), shm_demo (IPC), shell (nhận lệnh).
+- 3 user programs: counter (in số + yield), runaway (`while(1)` không yield — test preemption), shell (nhận lệnh).
 - Link riêng mỗi process — mỗi process là 1 binary riêng, kernel load vào vùng PA riêng.
 
 #### Implementation
@@ -509,51 +507,11 @@ docs/tech_docs/
 #### Liên kết
 - Files: `user/`, `user/lib/`, `user/programs/`
 - Phụ thuộc: Chapter 07 (syscall interface)
-- Tiếp theo: Chapter 09 — IPC
+- Tiếp theo: Chapter 09 — Shell
 
 ---
 
-### 09 — IPC: Process nói chuyện với nhau
-
-#### Nguyên lý
-- MMU cô lập các process — A không thấy memory B. Đây là mục đích. Nhưng đôi khi
-  2 process CẦN chia sẻ dữ liệu. Làm sao khi chúng sống trong thế giới riêng biệt?
-- Cách 1: đi qua kernel — process A gửi data cho kernel (syscall), kernel copy sang
-  buffer của B, B đọc (syscall). An toàn nhưng chậm — mỗi byte đi qua 2 lần copy + 2 syscall.
-- Cách 2: shared memory — kernel map cùng 1 vùng physical vào address space của cả A và B.
-  Hai process đọc/ghi trực tiếp, không qua kernel. Nhanh, đơn giản, nhưng cần protocol
-  để tránh race condition.
-- RingNova chọn shared memory — cơ chế IPC đơn giản nhất, đủ để chứng minh 2 process
-  có thể giao tiếp qua kernel-managed memory.
-
-#### Bối cảnh
-- 3 process chạy, scheduler hoạt động, syscall interface hoạt động.
-- Process hoàn toàn cô lập — chưa có cách nào trao đổi dữ liệu.
-
-#### Vấn đề
-- counter và shm_demo cần chia sẻ dữ liệu để demo IPC.
-- Không thể ghi vào address space của process khác — MMU cấm.
-
-#### Thiết kế
-- 1 MB shared region tại PA cố định (RAM_BASE + 0x500000).
-- Syscall shm_map(): kernel thêm entry vào page table caller → map VA 0x41000000 → shared PA.
-- Protocol: flag + length + data[]. Writer set flag=1, reader poll flag, đọc xong set flag=0.
-- Chỉ process 0 và 1 map. Process 2 (shell) không cần.
-- Permission: User RW. Kernel không kiểm soát nội dung — 2 process tự quản lý.
-
-#### Implementation
-- sys_shm_map(): validate caller, add page table entry, flush TLB.
-- User-side: shm_write(), shm_read() — thin wrappers trên shared memory pointer.
-- shm_demo.c: poll shared memory, in dữ liệu nhận được.
-
-#### Liên kết
-- Files: `kernel/ipc/`, syscall handler
-- Phụ thuộc: Chapter 07 (syscall), Chapter 03 (page table manipulation)
-- Tiếp theo: Chapter 10 — Shell
-
----
-
-### 10 — Shell: Kết nối mọi thứ lại
+### 09 — Shell: Kết nối mọi thứ lại
 
 #### Nguyên lý
 - OS không có giá trị nếu người dùng không tương tác được. Shell là giao diện giữa
@@ -566,7 +524,7 @@ docs/tech_docs/
 
 #### Bối cảnh
 - Toàn bộ system hoạt động: boot, MMU, interrupt, scheduler, syscall, user processes.
-- counter chạy, shm_demo chạy, nhưng chưa có cách tương tác realtime.
+- counter + runaway chạy, nhưng chưa có cách tương tác realtime.
 
 #### Vấn đề
 - Người dùng không kiểm soát được gì — chỉ nhìn output chạy qua.
@@ -577,7 +535,7 @@ docs/tech_docs/
 - Blocking read: gọi sys_read() → process BLOCKED đến khi UART nhận ký tự →
   IRQ handler đánh thức → process READY → scheduler pick → read() return.
   Đây là demo đẹp nhất của BLOCKED state.
-- Commands: ps, meminfo, kill <pid>, help.
+- Commands: ps, meminfo, kill <pid>, crash (test fault isolation), help.
 - Mỗi command = 1 hoặc nhiều syscall. Shell parse string → gọi syscall → in kết quả.
 
 #### Implementation

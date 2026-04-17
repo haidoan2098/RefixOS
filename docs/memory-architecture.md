@@ -51,8 +51,6 @@ RAM_BASE + 0x00300000  ├──────────────────
 RAM_BASE + 0x00400000  ├──────────────────────────────┤  4 MB
                        │  Process 2 Memory     (1 MB) │
 RAM_BASE + 0x00500000  ├──────────────────────────────┤  5 MB
-                       │  Shared Memory        (1 MB) │  IPC region
-RAM_BASE + 0x00600000  ├──────────────────────────────┤  6 MB
                        │  (free)                       │
                        └──────────────────────────────┘
 ```
@@ -93,11 +91,6 @@ Sau khi MMU bật và identity map đã bị xóa — đây là trạng thái cu
             │  L4_WKUP identity map │  UART0, CM_PER — kernel only
 0x44E0FFFF  ├──────────────────────┤
             │  Unmapped             │
-0x41000000  ├──────────────────────┤
-            │  Shared Memory (IPC)  │  1 MB, User RW
-            │  Mapped trong 2 process│
-0x40FFFFFF  ├──────────────────────┤
-            │  Unmapped guard       │
 0x40100000  ├──────────────────────┤
             │  User Stack           │  Grows down
             ├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤
@@ -116,7 +109,6 @@ Sau khi MMU bật và identity map đã bị xóa — đây là trạng thái cu
 | --- | --- | --- |
 | NULL page | Không handle | Unmapped → Translation Fault |
 | Vectors | Đầu kernel `0xC0000000` | High vectors `0xFFFF0000` (giống Linux) |
-| Shared memory | Không có | `0x41000000` — 1 MB |
 | User VA | `0x40000000`, shared PA | `0x40000000`, PA riêng per-process |
 
 **Peripheral mapping:** QEMU và BBB có địa chỉ peripheral khác nhau — identity map theo từng platform. Định nghĩa trong `board.h`, linker script và page table build phải tham chiếu từ đó.
@@ -206,17 +198,17 @@ Mỗi process có 1 page table riêng (16 KB, 4096 entries). Kernel region giố
 
 ### Cấu trúc chung
 
-| VA Region | Process 0 | Process 1 | Process 2 |
+| VA Region | Process 0 (counter) | Process 1 (runaway) | Process 2 (shell) |
 | --- | --- | --- | --- |
 | `0x00000000` | Fault (NULL guard) | Fault | Fault |
 | `0x40000000` (User) | → `RAM_BASE+0x200000` | → `RAM_BASE+0x300000` | → `RAM_BASE+0x400000` |
-| `0x41000000` (SHM) | → `RAM_BASE+0x500000` | → `RAM_BASE+0x500000` | Không map |
 | `0xC0000000` (Kernel) | → `RAM_BASE` | → `RAM_BASE` | → `RAM_BASE` |
 | Peripherals | Identity | Identity | Identity |
 | `0xFFFF0000` (Vectors) | → vectors PA | → vectors PA | → vectors PA |
 
-**Process 0 (counter)** và **Process 1 (shm_demo)** cùng map shared memory → IPC hoạt động.
-**Process 2 (shell)** không cần shared memory → không map `0x41000000`.
+Ba process có 3 PA riêng cho user region → process A crash không corrupt memory của B,
+C. Kernel region (`0xC0000000`) và peripherals được mirror vào cả 3 PGD để syscall
+handler chạy được trên bất kỳ process nào.
 
 ### Context switch — swap page table
 
@@ -295,51 +287,6 @@ Cùng VA nhưng khác PA → mỗi process có stack riêng thật sự.
 
 ---
 
-## Giai đoạn 6 — Shared Memory Region
-
-### Design
-
-| | |
-| --- | --- |
-| Physical | `RAM_BASE + 0x00500000` (1 MB) |
-| Virtual | `0x41000000` — nằm ngay sau user space |
-| Size | 1 MB (1 section descriptor) |
-| Permission | User RW (AP=11) |
-| Mapped trong | Process 0 và Process 1 (cả hai thấy cùng VA và PA) |
-
-### Cách hoạt động
-
-```text
-Process 0 gọi shm_map()
-  → Kernel thêm entry vào Process 0 page table:
-    pgd[0x410] = (RAM_BASE + 0x500000) | USER_RW_FLAGS
-
-Process 1 gọi shm_map()
-  → Kernel thêm entry vào Process 1 page table:
-    pgd[0x410] = (RAM_BASE + 0x500000) | USER_RW_FLAGS
-
-Cả hai process đọc/ghi 0x41000000 → cùng physical memory → IPC
-```
-
-### Protocol đơn giản
-
-```text
-┌────────────────────────────────────────┐
-│  Shared Memory @ 0x41000000            │
-│                                        │
-│  +0x000: flag   (0 = empty, 1 = ready) │
-│  +0x004: length                        │
-│  +0x008: data[]                        │
-└────────────────────────────────────────┘
-
-Process 0: write data → set flag = 1
-Process 1: poll flag → khi = 1, đọc data → set flag = 0
-```
-
-**So sánh VinixOS:** VinixOS không có IPC. RingNova thêm shared memory — cơ chế IPC đơn giản nhất có thể.
-
----
-
 ## Tổng kết
 
 | Thành phần | Physical (offset) | Virtual | Size |
@@ -354,8 +301,7 @@ Process 1: poll flag → khi = 1, đọc data → set flag = 0
 | Process 0 memory | `+0x200000` | `0x40000000` | 1 MB |
 | Process 1 memory | `+0x300000` | `0x40000000` | 1 MB |
 | Process 2 memory | `+0x400000` | `0x40000000` | 1 MB |
-| Shared memory | `+0x500000` | `0x41000000` | 1 MB |
-| **Tổng** | | | **~6 MB** (kernel stacks tăng 12KB, không đáng kể) |
+| **Tổng** | | | **~5 MB** |
 
 ---
 
@@ -419,17 +365,6 @@ VA mới: 0x40000000 (user space, per-process)
 
 Không thêm memory. Shell dùng Process 2 memory đã cấp.
 
-### Phase 6 — Shared Memory
-
-```text
-                     ...
-RAM_BASE + 0x500000  ├───────────────────┤
-                     │  Shared Memory     │  1 MB     ← MỚI
-RAM_BASE + 0x600000  └───────────────────┘
-
-VA mới: 0x41000000 (shared, trong Process 0 + 1)
-```
-
 ### Tóm tắt
 
 | Phase | Thêm gì | Tổng dùng |
@@ -439,4 +374,3 @@ VA mới: 0x41000000 (shared, trong Process 0 + 1)
 | Phase 3 | Không thêm | ~1.1 MB |
 | Phase 4 | 3 PT + 3 kernel stacks (8KB each) + 3 user regions | ~5 MB |
 | Phase 5 | Không thêm | ~5 MB |
-| Phase 6 | Shared memory | ~6 MB |
