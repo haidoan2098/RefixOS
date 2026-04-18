@@ -27,16 +27,13 @@
    * VA = PA + VIRT_OFFSET; PA = VA - VIRT_OFFSET               */
   #define PHYS_OFFSET     (KERNEL_VIRT_BASE - RAM_BASE) /* 0x50000000 */
 
-  /* PL011 UART0 — ARM PrimeCell, realview-pb-a8
-   * Reference: ARM DDI 0183 (PL011 TRM)                        */
+  /* PL011 UART0 — ARM PrimeCell, realview-pb-a8 */
   #define UART0_BASE      0x10009000U
 
-  /* SP804 Dual Timer 0 — tick source for scheduler
-   * Reference: ARM DDI 0271 (SP804 TRM)                        */
+  /* SP804 Dual Timer 0 — tick source for scheduler */
   #define TIMER0_BASE     0x10011000U
 
-  /* GIC v1 — realview-pb-a8 maps CPU interface then distributor.
-   * Reference: ARM IHI 0048 (GIC Architecture Specification)  */
+  /* GIC v1 — realview-pb-a8 maps CPU interface then distributor. */
   #define GIC_CPU_BASE    0x1E000000U
   #define GIC_DIST_BASE   0x1E001000U
 
@@ -59,20 +56,16 @@
   /* Physical-to-virtual offset */
   #define PHYS_OFFSET     (KERNEL_VIRT_BASE - RAM_BASE) /* 0x40000000 */
 
-  /* UART0 — NS16550 compatible
-   * Reference: AM335x TRM §19                                  */
+  /* UART0 — NS16550 compatible */
   #define UART0_BASE      0x44E09000U
 
-  /* DMTIMER2 — OS tick source
-   * Reference: AM335x TRM §20                                  */
+  /* DMTIMER2 — OS tick source */
   #define TIMER2_BASE     0x48040000U
 
-  /* INTC — Interrupt Controller
-   * Reference: AM335x TRM §6                                   */
+  /* INTC — Interrupt Controller */
   #define INTC_BASE       0x48200000U
 
-  /* CM_PER — Clock Module for peripherals (DMTIMER2 gate)
-   * Reference: AM335x TRM §8                                   */
+  /* CM_PER — Clock Module for peripherals (DMTIMER2 gate) */
   #define CM_PER_BASE     0x44E00000U
 
   /* DMTIMER2 fed from CLK_M_OSC = 24 MHz */

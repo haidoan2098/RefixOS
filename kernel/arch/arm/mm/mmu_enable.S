@@ -8,9 +8,8 @@
  * single SCTLR write. Caller must have already populated the
  * page table referenced by r0.
  *
- * Sequence adapted from VinixOS mmu_enable.S — verified on BBB
- * hardware. Order of barriers matters: a missed DSB/ISB here
- * will corrupt speculated fetches after M=1.
+ * Order of barriers matters: a missed DSB/ISB here will corrupt
+ * speculated fetches after M=1.
  * ============================================================ */
 
     .section .text.mmu, "ax"

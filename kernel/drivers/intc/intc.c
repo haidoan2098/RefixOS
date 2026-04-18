@@ -155,7 +155,7 @@ void intc_eoi(uint32_t irq)
 /* ================================================================
  *  PLATFORM_BBB — AM335x INTC
  *
- *  128 lines (4 banks × 32). TRM §6. EOI via NEWIRQAGR.
+ *  128 lines (4 banks × 32). EOI via NEWIRQAGR.
  * ================================================================ */
 #elif defined(PLATFORM_BBB)
 

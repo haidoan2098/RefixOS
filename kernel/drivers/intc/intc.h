@@ -5,8 +5,8 @@
  * intc.h — Platform interrupt controller interface
  *
  * Backends selected at compile time via board.h:
- *   PLATFORM_QEMU → PL190 VIC  (ARM DDI 0181)
- *   PLATFORM_BBB  → AM335x INTC (TRM §6)
+ *   PLATFORM_QEMU → GIC v1 (distributor + CPU interface)
+ *   PLATFORM_BBB  → AM335x INTC
  *
  * Only the dispatch layer (irq.c) should call these directly.
  */

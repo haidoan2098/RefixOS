@@ -2,8 +2,8 @@
  * kernel/drivers/timer/timer.c — Periodic tick source
  *
  * Two hardware backends:
- *   PLATFORM_QEMU → SP804 Dual Timer (ARM DDI 0271), 1 MHz clock
- *   PLATFORM_BBB  → AM335x DMTIMER2  (TRM §20),    24 MHz clock
+ *   PLATFORM_QEMU → SP804 Dual Timer, 1 MHz clock
+ *   PLATFORM_BBB  → AM335x DMTIMER2,  24 MHz clock
  *
  * Counts ticks at 10 ms by default. The IRQ handler
  * (timer_irq) acks the timer, bumps tick_count, and calls the

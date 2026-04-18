@@ -130,7 +130,11 @@ void process_init_all(void)
         p->name        = proc_names[i];
 
         p->pgd         = proc_pgd[i];
-        p->pgd_pa      = (uint32_t)proc_pgd[i];   /* identity for now */
+        /* pgd is the VA pointer (linker symbol); pgd_pa is what
+         * the MMU needs in TTBR0. Since the kernel image is linked
+         * at VMA 0xC0..., proc_pgd[i]'s VA is high and its PA is
+         * one PHYS_OFFSET below. */
+        p->pgd_pa      = (uint32_t)proc_pgd[i] - PHYS_OFFSET;
 
         p->kstack_base = proc_kstack[i];
         p->kstack_size = KSTACK_SIZE;
@@ -140,11 +144,13 @@ void process_init_all(void)
         p->user_phys_base = USER_PHYS_BASE + i * USER_PHYS_STRIDE;
 
         /* Drop a fresh copy of the user stub into this process's
-         * physical slot. Kernel currently runs under the boot PGD
-         * which identity-maps RAM, so writing to user_phys_base
-         * directly goes through. */
-        kmemset((void *)p->user_phys_base, 0, USER_REGION_SIZE);
-        kmemcpy((void *)p->user_phys_base, user_stub_start, stub_size);
+         * physical slot. Kernel runs at high VA, so we reach the
+         * user PA through the high-VA alias (PA + PHYS_OFFSET)
+         * rather than via the identity map — the identity range
+         * will be torn down once all boot-time PA touches are gone. */
+        void *user_va = (void *)(p->user_phys_base + PHYS_OFFSET);
+        kmemset(user_va, 0, USER_REGION_SIZE);
+        kmemcpy(user_va, user_stub_start, stub_size);
 
         /* Build the per-process L1 table: kernel mirror + user
          * section at 0x40000000 → p->user_phys_base */

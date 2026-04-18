@@ -5,7 +5,6 @@
  * mmu.h — ARMv7-A MMU definitions and public API
  *
  * Section mapping only (1 MB granularity).
- * Reference: ARM ARM B3.5.1 (L1 translation table format).
  * ============================================================ */
 
 #include <stdint.h>
@@ -56,10 +55,26 @@
 /* Virtual address constants */
 #define VA_KERNEL_BASE      0xC0000000U
 
-/* Public API */
-void     mmu_init(void);
-void     mmu_build_boot_pgd(void);
+/* Public API
+ *
+ * mmu_init() runs at PA (MMU off) — called from start.S with
+ * phys_offset = VA - PA. Builds boot_pgd via a PA pointer and
+ * enables the MMU. Never touches UART; kmain prints after the
+ * VA trampoline via mmu_print_status().
+ *
+ * mmu_build_boot_pgd() takes an explicit pgd pointer so it can
+ * be invoked at PA (pgd argument = boot_pgd - phys_offset).
+ * After MMU is on the same function can be called at VA with
+ * pgd = boot_pgd, but we only need the pre-MMU path today. */
+void     mmu_init(uint32_t phys_offset);
+void     mmu_build_boot_pgd(uint32_t *pgd);
 void     mmu_enable(uint32_t pgd_pa);   /* implemented in assembly */
+void     mmu_print_status(void);        /* call from kmain at VA  */
+/* mmu_drop_identity() removes the identity PA->PA range from the
+ * boot L1 table and flushes the TLB. Safe only after every kernel
+ * code path has moved to VA (start.S trampoline + no lingering PA
+ * pointers). Any stray PA dereference after this faults. */
+void     mmu_drop_identity(void);
 uint32_t mmu_read_sctlr(void);
 uint32_t mmu_read_ttbr0(void);
 

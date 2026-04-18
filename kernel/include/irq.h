@@ -18,7 +18,7 @@
   /* realview-pb-a8 GIC: SP804 Timer0_1 = SPI #4 → GIC ID 36 */
   #define IRQ_TIMER       36U
 #elif defined(PLATFORM_BBB)
-  /* AM335x TRM Table 6-1: DMTIMER2 = interrupt #68 */
+  /* AM335x: DMTIMER2 interrupt line = 68 */
   #define IRQ_TIMER       68U
 #endif
 

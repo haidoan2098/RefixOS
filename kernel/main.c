@@ -1,13 +1,21 @@
 /* ===========================================================
- * kernel/main.c — Kernel C entry point
+ * kernel/main.c — Kernel C entry points
  *
- * Called from kernel/arch/arm/boot/start.S after:
- *   - Exception-mode stacks are set up
- *   - BSS is zeroed
- *   - MMU is OFF (physical addresses only)
+ * Boot is split across two C functions, both called from
+ * kernel/arch/arm/boot/start.S:
  *
- * Purpose at this stage: verify UART output works.
- *   Next phase will add exception vector table, then MMU.
+ *   kearly()  — runs at PA (MMU off → on). Initialises UART,
+ *               prints the boot banner, then calls mmu_init().
+ *               Returns to start.S with MMU on; identity map
+ *               keeps PC alive at PA.
+ *
+ *   kmain()   — runs at VA (after start.S trampolines PC into
+ *               the 0xC0... half). Installs vector table, brings
+ *               up IRQ + timer + processes, runs self-tests.
+ *
+ * All pointers/symbols print as VA (0xc01xxxxx); inside kmain
+ * the kernel is genuinely executing through the MMU, no longer
+ * relying on the identity map.
  * =========================================================== */
 
 #include "drivers/uart/uart.h"
@@ -65,16 +73,21 @@ static void run_boot_tests(void)
         }
     }
 
-    /* T2 — TTBR0 base == boot_pgd address */
+    /* T2 — TTBR0 base == PA of boot_pgd.
+     * boot_pgd symbol resolves to VA (0xc010xxxx); TTBR0 holds the
+     * physical page-table base (0x7010xxxx). Subtract PHYS_OFFSET
+     * to compare. */
     {
-        uint32_t ttbr0 = mmu_read_ttbr0();
-        uint32_t base  = ttbr0 & 0xFFFFC000U;
-        if (base == (uint32_t)boot_pgd) {
-            uart_printf("[TEST] [PASS] T2 TTBR0 base = boot_pgd (0x%08x)\n", base);
+        uint32_t ttbr0  = mmu_read_ttbr0();
+        uint32_t base   = ttbr0 & 0xFFFFC000U;
+        uint32_t pgd_pa = (uint32_t)boot_pgd - PHYS_OFFSET;
+        if (base == pgd_pa) {
+            uart_printf("[TEST] [PASS] T2 TTBR0 base = boot_pgd PA (0x%08x)\n",
+                        base);
             pass++;
         } else {
-            uart_printf("[TEST] [FAIL] T2 TTBR0 base 0x%08x != boot_pgd 0x%08x\n",
-                        base, (uint32_t)boot_pgd);
+            uart_printf("[TEST] [FAIL] T2 TTBR0 base 0x%08x != boot_pgd PA 0x%08x\n",
+                        base, pgd_pa);
             fail++;
         }
     }
@@ -96,22 +109,28 @@ static void run_boot_tests(void)
         }
     }
 
-    /* T4 — High VA alias write-through: write via VA, read via PA */
+    /* T4 — Identity alias still live: write via PA (identity map),
+     * read back via the primary VA reference and vice versa. Confirms
+     * kmain's PA<->VA aliasing is coherent while the identity map
+     * exists (will be torn down by mmu_drop_identity later). */
     {
         static volatile uint32_t scratch;
-        uint32_t pa_addr = (uint32_t)&scratch;
-        uint32_t va_addr = VA_KERNEL_BASE + (pa_addr - RAM_BASE);
+        uint32_t va_addr = (uint32_t)&scratch;
+        uint32_t pa_addr = va_addr - PHYS_OFFSET;
 
         scratch = 0x11111111U;
-        *((volatile uint32_t *)va_addr) = 0xCAFEBABEU;
-        if (scratch == 0xCAFEBABEU) {
-            uart_printf("[TEST] [PASS] T4 VA alias write: "
-                        "wrote 0x%08x via VA 0x%08x, PA readback OK\n",
-                        (uint32_t)scratch, va_addr);
+        uint32_t pa_readback = *((volatile uint32_t *)pa_addr);
+
+        *((volatile uint32_t *)pa_addr) = 0xCAFEBABEU;
+        uint32_t va_readback = scratch;
+
+        if (pa_readback == 0x11111111U && va_readback == 0xCAFEBABEU) {
+            uart_printf("[TEST] [PASS] T4 identity alias: VA 0x%08x <-> PA 0x%08x coherent\n",
+                        va_addr, pa_addr);
             pass++;
         } else {
-            uart_printf("[TEST] [FAIL] T4 VA alias write: PA readback=0x%08x\n",
-                        (uint32_t)scratch);
+            uart_printf("[TEST] [FAIL] T4 identity alias: pa_rd=0x%08x va_rd=0x%08x\n",
+                        pa_readback, va_readback);
             fail++;
         }
         scratch = 0;
@@ -255,6 +274,18 @@ static void run_boot_tests(void)
                 pass, fail);
 }
 
+/*
+ * kmain() — kernel C entry point.
+ *
+ * By the time we get here:
+ *   - start.S has computed PHYS_OFFSET and called mmu_init(),
+ *     which built boot_pgd at PA and turned the MMU on.
+ *   - start.S has trampolined PC into the high-VA alias via
+ *     `ldr pc, =_start_va` and re-seated every mode's SP at VA.
+ *
+ * So UART, exception init, drivers, processes — everything —
+ * run with the MMU on and addresses resolving through it.
+ */
 void kmain(void)
 {
     uint32_t cpsr;
@@ -276,6 +307,8 @@ void kmain(void)
     uart_printf("[BOOT] .bss     : %p — %p\n",
                 (uint32_t)&_bss_start, (uint32_t)&_bss_end);
     uart_printf("[BOOT] SVC stack: %p\n", (uint32_t)&_svc_stack_top);
+    uart_printf("[BOOT] &kmain   : %p  (expect 0xC01xxxxx)\n",
+                (uint32_t)&kmain);
 
     cpsr = read_cpsr();
     uart_printf("[BOOT] CPSR     : %p (mode=%x, IRQ=%s, FIQ=%s)\n",
@@ -283,9 +316,8 @@ void kmain(void)
                 cpsr & 0x1FU,
                 (cpsr & (1U << 7)) ? "masked" : "on",
                 (cpsr & (1U << 6)) ? "masked" : "on");
-    uart_printf("[BOOT] MMU      : off\n");
 
-    mmu_init();
+    mmu_print_status();
 
     exception_init();
 
@@ -300,6 +332,10 @@ void kmain(void)
 
     run_boot_tests();
 
+    /* Kernel has fully migrated off PA — tear down the identity
+     * map so any future stray PA dereference faults immediately. */
+    mmu_drop_identity();
+
     /* Destructive tests — enable ONE at a time, each halts the system */
 #define TEST_NONE       0
 #define TEST_DATA_ABORT 1
@@ -309,9 +345,11 @@ void kmain(void)
 #define EXCEPTION_TEST  TEST_NONE
 
 #if EXCEPTION_TEST == TEST_DATA_ABORT
-    /* Test Data Abort — enable alignment check then do unaligned
-     * 32-bit read. QEMU doesn't fault on unmapped PA reads, but
-     * SCTLR.A=1 + unaligned access triggers Data Abort reliably. */
+    /* Test Data Abort — do an unaligned 32-bit read with SCTLR.A=1.
+     * Note: this block runs AFTER mmu_drop_identity(), so 0x70100001
+     * is unmapped in the boot_pgd; the read would also fault as a
+     * translation fault regardless of alignment. Either path fires
+     * handle_data_abort — use this block to exercise the handler. */
     uart_printf("[TEST] triggering Data Abort (unaligned access)...\n");
     {
         /* Enable alignment checking: SCTLR.A (bit 1) = 1 */
@@ -320,7 +358,9 @@ void kmain(void)
         sctlr |= (1U << 1);
         __asm__ volatile("mcr p15, 0, %0, c1, c0, 0" :: "r"(sctlr));
         __asm__ volatile("isb");
-        /* Unaligned 32-bit read → Data Abort */
+        /* Read via a VA that guarantees a fault: pick an address in
+         * the former identity range and make it unaligned for good
+         * measure. DFAR/DFSR will tell us which fault fired. */
         volatile uint32_t x = *((volatile uint32_t *)0x70100001U);
         (void)x;
     }
