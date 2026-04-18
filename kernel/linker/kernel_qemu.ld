@@ -5,17 +5,34 @@
  *   Physical RAM base : 0x70000000 (128 MB)
  *   Kernel load PA    : 0x70100000  (first 1 MB reserved for
  *                        exception vector table + peripheral map)
+ *   Kernel link VA    : 0xC0100000  (3G/1G split, Linux ARM style)
  *
- * MMU is OFF at entry — CPU uses physical addresses directly.
- * Virtual address split (3G/1G) is enforced later by MMU init.
+ * ELF layout: every section has split VMA/LMA.
+ *   VMA (VIRT region) → runtime addresses, symbols emit here
+ *   LMA (PHYS region) → QEMU -kernel loads bytes here
+ *
+ * Boot sequence expectation (start.S):
+ *   1. Enter at PA 0x70100000 (MMU off). Absolute symbol loads
+ *      resolve to VA — must subtract PHYS_OFFSET before use.
+ *   2. mmu_enable() turns on MMU with identity + high-VA mapping.
+ *   3. Trampoline PC to VA via `ldr pc, =kmain`. From here on
+ *      every fetch goes through MMU at 0xC0...
  * =========================================================== */
 
-ENTRY(_start)
+/* ELF entry point = PA of _start.
+ * QEMU -kernel reads e_entry and sets initial PC before MMU is on,
+ * so it MUST be the physical address (bytes are loaded at LMA).
+ * `_start` symbol itself resolves to VMA 0xC0100000; we override
+ * the ELF entry below to the matching PA.                        */
+ENTRY(_start_phys)
 
 MEMORY
 {
-    /* Physical RAM available to the kernel image + stacks */
-    RAM (rwx) : ORIGIN = 0x70100000, LENGTH = 127M
+    /* PHYS — where QEMU -kernel loads the image (LMA) */
+    PHYS (rwx) : ORIGIN = 0x70100000, LENGTH = 127M
+
+    /* VIRT — where symbols resolve at runtime (VMA) */
+    VIRT (rwx) : ORIGIN = 0xC0100000, LENGTH = 127M
 }
 
 SECTIONS
@@ -34,7 +51,7 @@ SECTIONS
         *(.rodata*)
         . = ALIGN(4);
         _text_end = .;
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .user_stub — inline user-mode code template (phase 1 of
@@ -47,7 +64,7 @@ SECTIONS
         . = ALIGN(4);
         KEEP(*(.user_stub))
         . = ALIGN(4);
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .data — initialised data (ROM → RAM copy not needed
@@ -60,7 +77,7 @@ SECTIONS
         *(.data*)
         . = ALIGN(4);
         _data_end = .;
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .bss — zero-initialised data
@@ -79,7 +96,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(8);
         _bss_end = .;
-    } > RAM
+    } > VIRT
 
     /* -------------------------------------------------------
      * .stack — per-mode exception stacks
@@ -110,8 +127,13 @@ SECTIONS
            Kernel C code runs in SVC mode → needs the most space */
         . = . + 0x2000;
         PROVIDE(_svc_stack_top = .);
-    } > RAM
+    } > VIRT
 
     /* Symbols for heap start (future kmalloc) */
     PROVIDE(_heap_start = .);
+
+    /* PA of _start — used as ELF e_entry so QEMU boots at PA
+     * (MMU is off at reset; VA would be unmapped). Equals
+     * LOADADDR(.text) which equals PHYS ORIGIN.                  */
+    _start_phys = LOADADDR(.text);
 }

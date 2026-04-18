@@ -4,15 +4,32 @@
  * Target: BeagleBone Black (AM335x)
  *   Physical DDR base : 0x80000000 (512 MB)
  *   Kernel load PA    : 0x80000000  (SPL loads kernel here)
+ *   Kernel link VA    : 0xC0000000  (3G/1G split, Linux ARM style)
  *
- * MMU is OFF at entry — CPU uses physical addresses directly.
+ * ELF layout: every section has split VMA/LMA.
+ *   VMA (VIRT region) → runtime addresses, symbols emit here
+ *   LMA (PHYS region) → SPL copies bytes here
+ *
+ * Boot sequence expectation (start.S):
+ *   1. Enter at PA 0x80000000 (MMU off). Absolute symbol loads
+ *      resolve to VA — must subtract PHYS_OFFSET before use.
+ *   2. mmu_enable() turns on MMU with identity + high-VA mapping.
+ *   3. Trampoline PC to VA via `ldr pc, =kmain`.
  * =========================================================== */
 
-ENTRY(_start)
+/* ELF entry point = PA of _start.
+ * SPL jumps to a physical address after copying the image; MMU is
+ * off at that point so PC must be PA. `_start` symbol resolves to
+ * VMA 0xC0000000; override e_entry to the matching PA.           */
+ENTRY(_start_phys)
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 512M
+    /* PHYS — where SPL copies the image (LMA) */
+    PHYS (rwx) : ORIGIN = 0x80000000, LENGTH = 512M
+
+    /* VIRT — where symbols resolve at runtime (VMA) */
+    VIRT (rwx) : ORIGIN = 0xC0000000, LENGTH = 512M
 }
 
 SECTIONS
@@ -31,7 +48,7 @@ SECTIONS
         *(.rodata*)
         . = ALIGN(4);
         _text_end = .;
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .user_stub — inline user-mode code template (phase 1 of
@@ -43,7 +60,7 @@ SECTIONS
         . = ALIGN(4);
         KEEP(*(.user_stub))
         . = ALIGN(4);
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .data — initialised data
@@ -55,7 +72,7 @@ SECTIONS
         *(.data*)
         . = ALIGN(4);
         _data_end = .;
-    } > RAM
+    } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
      * .bss — zero-initialised data
@@ -74,7 +91,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(8);
         _bss_end = .;
-    } > RAM
+    } > VIRT
 
     /* -------------------------------------------------------
      * .stack — per-mode exception stacks
@@ -104,7 +121,10 @@ SECTIONS
         /* SVC (Supervisor) stack — 8 KB */
         . = . + 0x2000;
         PROVIDE(_svc_stack_top = .);
-    } > RAM
+    } > VIRT
 
     PROVIDE(_heap_start = .);
+
+    /* PA of _start — used as ELF e_entry (see comment at top).    */
+    _start_phys = LOADADDR(.text);
 }
