@@ -181,26 +181,31 @@ _vec_svc:     .word exception_entry_svc          │  kề ngay vector table
 ...                                              ┘
 ```
 
-**Tại sao `ldr pc` thay vì `b handler`?** — Instruction `b` chỉ jump được ±32 MB. Nếu
-handler ở xa hơn (kernel có thể load ở 0x70100000 hoặc 0x80000000, handler ở bất kỳ đâu
-trong 4 GB) → `b` không đủ. `ldr pc, [literal]` load address 32-bit đầy đủ → jump được
-bất kỳ đâu.
+**Tại sao `ldr pc` thay vì `b handler`?** — Instruction `b` chỉ jump được ±32 MB. Kernel
+linked ở VA `0xC0100000`, handler C ở bất kỳ đâu trong 4 GB → `b` có thể không đủ.
+`ldr pc, [literal]` load address 32-bit đầy đủ → jump được bất kỳ đâu, cả VA cao lẫn
+VA user nếu cần.
 
 ### VBAR — đặt vector table ở đâu
 
 Kernel ghi address của vector table vào VBAR (cp15 register). CPU sẽ tính slot dựa trên
 VBAR + offset:
 
-```
-VBAR = &_vectors_start   (ví dụ: 0x70100080)
+```text
+VBAR = &_vectors_start   (VA cao, ví dụ: 0xC01000A0)
 
 Data Abort xảy ra:
-  PC ← VBAR + 0x10 = 0x70100090
-  CPU fetch `ldr pc, _vec_dabort` → nhảy đến handle_data_abort
+  PC ← VBAR + 0x10 = 0xC01000B0
+  CPU fetch `ldr pc, _vec_dabort` (đi qua MMU) → nhảy đến handle_data_abort
 ```
 
 **Constraint**: VBAR phải **32-byte aligned**. Linker script thêm `. = ALIGN(32)` trước
 section `.vectors`.
+
+**VBAR phải là VA, không phải PA:** `exception_init` gọi sau khi MMU on + trampoline, nên
+`&_vectors_start` resolve ra VA. CPU fetch vector qua MMU tại `0xC01000A0+offset` → đúng.
+Nếu trót set VBAR = PA, khi identity RAM bị drop (chapter 03) thì exception không còn
+fetch được vector → triple fault.
 
 ### LR adjustment — mỗi exception khác nhau
 
@@ -323,10 +328,10 @@ rồi "nhảy" sang SVC stack (bước 3) để làm việc thật.
 
 | File | Nội dung |
 |------|----------|
-| [vectors.S](../../../kernel/arch/arm/exception/vectors.S) | Vector table (8 slot + literal pool) |
-| [exception_entry.S](../../../kernel/arch/arm/exception/exception_entry.S) | 6 entry stub: undef, svc, pabort, dabort, irq, fiq |
-| [exception_handlers.c](../../../kernel/arch/arm/exception/exception_handlers.c) | C handlers: đọc fault register, dump context, halt/return |
-| [exception.h](../../../kernel/include/exception.h) | `exception_context_t` struct + handler prototypes |
+| [vectors.S](../../kernel/arch/arm/exception/vectors.S) | Vector table (8 slot + literal pool) |
+| [exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | 6 entry stub: undef, svc, pabort, dabort, irq, fiq |
+| [exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | C handlers: đọc fault register, dump context, halt/return |
+| [exception.h](../../kernel/include/exception.h) | `exception_context_t` struct + handler prototypes |
 
 ### Điểm chính
 
@@ -403,12 +408,12 @@ dùng thật.
 
 | File | Vai trò |
 |------|---------|
-| [kernel/arch/arm/exception/vectors.S](../../../kernel/arch/arm/exception/vectors.S) | Vector table |
-| [kernel/arch/arm/exception/exception_entry.S](../../../kernel/arch/arm/exception/exception_entry.S) | Entry stubs |
-| [kernel/arch/arm/exception/exception_handlers.c](../../../kernel/arch/arm/exception/exception_handlers.c) | C handlers + VBAR setup |
-| [kernel/include/exception.h](../../../kernel/include/exception.h) | Context struct + prototypes |
-| [kernel/linker/kernel_qemu.ld](../../../kernel/linker/kernel_qemu.ld) | `.vectors` section alignment |
-| [kernel/linker/kernel_bbb.ld](../../../kernel/linker/kernel_bbb.ld) | (same cho BBB) |
+| [kernel/arch/arm/exception/vectors.S](../../kernel/arch/arm/exception/vectors.S) | Vector table |
+| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | Entry stubs |
+| [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | C handlers + VBAR setup |
+| [kernel/include/exception.h](../../kernel/include/exception.h) | Context struct + prototypes |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | `.vectors` section alignment |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | (same cho BBB) |
 
 ### Dependencies
 

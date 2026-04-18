@@ -111,10 +111,10 @@ bảng khi switch → process A không thấy được memory của process B, k
 mà vì trong bản đồ của A đơn giản **không có entry nào** trỏ đến vùng của B. Đây là cách
 Linux/Windows isolate process.
 
-Ngược lại, có những kernel nhỏ (ví dụ VinixOS) dùng **page table duy nhất**: mỗi process
-ở VA khác nhau nhưng cùng một bảng. Tiện — không cần swap TTBR0, không cần flush TLB.
-Nhưng mất isolation: process A vẫn có entry VA cho vùng của B trong cùng bảng, chỉ "không
-nên" truy cập. Lỗi code = corrupt nhau.
+Ngược lại, một số kernel nhỏ dùng **page table duy nhất**: mỗi process ở VA khác nhau
+nhưng cùng một bảng. Tiện — không cần swap TTBR0, không cần flush TLB. Nhưng mất
+isolation: process A vẫn có entry VA cho vùng của B trong cùng bảng, chỉ "không nên"
+truy cập. Lỗi code = corrupt nhau.
 
 RingNova chọn **per-process page table** — đi theo spec dự án: "MMU isolation là thật".
 Cost: mỗi switch phải ghi TTBR0 và flush TLB.
@@ -274,14 +274,16 @@ boot_pgd               proc_pgd[0]            proc_pgd[1]            proc_pgd[2]
 ```
 
 Kết quả:
+
 - **NULL guard** giữ nguyên → tất cả process deref NULL đều Data Abort
 - **User section** (`0x40000000`): 3 process trỏ 3 PA khác nhau → isolation thật
 - **Kernel high-VA** (`0xC0000000`): cùng PA, cùng permission → kernel luôn access được
 - **Peripherals**: cùng — tất cả process gọi syscall đều thấy UART/timer
-- **Identity RAM**: xoá → khi context switch, CPU không thể tiếp tục chạy ở PA của
-  kernel được nữa. Chi tiết này quan trọng cho chapter sau: trước khi swap TTBR0,
-  kernel phải đã nhảy vào high-VA alias `0xC0...`. Với chapter hiện tại, TTBR0 chưa
-  swap, nên chưa ảnh hưởng.
+- **Identity RAM**: xoá → khi context switch swap TTBR0 sang `proc_pgd[i]`, CPU mất
+  quyền truy cập PA của kernel qua identity. Điều này không phải vấn đề: kernel đã
+  trampoline PC vào high-VA từ lúc boot (`ldr pc, =_start_va` trong `start.S` ngay
+  sau `mmu_enable` — xem chapter 03), nên PC nằm trong `0xC0...` — entry này tồn
+  tại trong cả `boot_pgd` lẫn mọi `proc_pgd[i]`. Swap TTBR0 không cần trampoline thêm.
 
 ### Inline user stub — 3 bản sao vật lý
 
@@ -374,12 +376,12 @@ trỏ vào PCB 0. **TTBR0 vẫn chưa đổi** — boot_pgd đang dịch địa 
 ### Hai bản đồ song song — boot_pgd vs proc_pgd[i]
 
 ```
-       boot_pgd (ACTIVE — TTBR0 trỏ đây)
+       boot_pgd (ACTIVE — TTBR0 trỏ đây, identity đã drop sau self-tests)
        ┌────────────────────────────────────┐
        │ 0x000: FAULT      (NULL guard)     │
        │ 0x400: FAULT      (chưa có user)   │
-       │ 0x700-0x77F: identity RAM          │  ← kernel đang dùng đoạn này
-       │ 0xC00-0xC7F: high-VA alias RAM     │
+       │ 0x700-0x77F: FAULT (dropped)       │  ← mmu_drop_identity xoá
+       │ 0xC00-0xC7F: high-VA alias RAM     │  ← kernel đang chạy ở đây
        │ 0x100/0x1E0: peripherals           │
        └────────────────────────────────────┘
 
@@ -387,16 +389,16 @@ trỏ vào PCB 0. **TTBR0 vẫn chưa đổi** — boot_pgd đang dịch địa 
        ┌────────────────────────────────────┐
        │ 0x000: FAULT                       │
        │ 0x400: → RAM_BASE+0x200000 (user)  │  ★
-       │ 0x700-0x77F: FAULT (no identity)   │  ★ khác boot_pgd
+       │ 0x700-0x77F: FAULT (no identity)   │
        │ 0xC00-0xC7F: high-VA (giống)       │
        │ 0x100/0x1E0: peripherals (giống)   │
        └────────────────────────────────────┘
 ```
 
-Khi chapter context switch xong và TTBR0 swap sang `proc_pgd[0]`, kernel **sẽ mất** vùng
-identity RAM — đó là vùng đã chạy kmain đến giờ. Kernel lúc đó phải đã nhảy vào alias
-`0xC0...` từ trước, nếu không PC trỏ vào vùng không có entry → Data Abort. Chi tiết này
-chapter sau xử lý.
+Sau khi `mmu_drop_identity()` chạy, `boot_pgd` và `proc_pgd[i]` giờ **rất giống nhau**
+ngoại trừ entry `0x400` (user section riêng của mỗi process). Đó chính là bất biến cần
+để context switch gọn: swap TTBR0 sang `proc_pgd[i]`, kernel vẫn chạy qua `0xC0...`,
+user code ở `0x40000000` giờ trỏ đúng PA của process mới.
 
 ---
 
@@ -406,15 +408,15 @@ chapter sau xử lý.
 
 | File | Nội dung |
 |------|----------|
-| [kernel/include/proc.h](../../../kernel/include/proc.h) | `process_t`, `proc_context_t`, `task_state_t`, API |
-| [kernel/proc/process.c](../../../kernel/proc/process.c) | `processes[3]`, `proc_pgd[3]`, `proc_kstack[3]`, init logic |
-| [kernel/arch/arm/proc/user_stub.S](../../../kernel/arch/arm/proc/user_stub.S) | Inline user stub (section `.user_stub`) |
-| [kernel/arch/arm/mm/pgtable.c](../../../kernel/arch/arm/mm/pgtable.c) | Thêm `pgtable_build_for_proc` |
-| [kernel/include/mmu.h](../../../kernel/include/mmu.h) | Thêm `PDE_USER_TEXT`, prototype mới |
-| [kernel/include/board.h](../../../kernel/include/board.h) | `USER_VIRT_BASE`, `NUM_PROCESSES`, `KSTACK_SIZE`, v.v. |
-| [kernel/linker/kernel_qemu.ld](../../../kernel/linker/kernel_qemu.ld) | Section `.user_stub`, input pattern `.bss.proc_pgd` aligned 16 KB |
-| [kernel/linker/kernel_bbb.ld](../../../kernel/linker/kernel_bbb.ld) | Tương tự kernel_qemu.ld |
-| [kernel/main.c](../../../kernel/main.c) | Gọi `process_init_all()`, tests T7/T8/T9 |
+| [kernel/include/proc.h](../../kernel/include/proc.h) | `process_t`, `proc_context_t`, `task_state_t`, API |
+| [kernel/proc/process.c](../../kernel/proc/process.c) | `processes[3]`, `proc_pgd[3]`, `proc_kstack[3]`, init logic |
+| [kernel/arch/arm/proc/user_stub.S](../../kernel/arch/arm/proc/user_stub.S) | Inline user stub (section `.user_stub`) |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Thêm `pgtable_build_for_proc` |
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Thêm `PDE_USER_TEXT`, prototype mới |
+| [kernel/include/board.h](../../kernel/include/board.h) | `USER_VIRT_BASE`, `NUM_PROCESSES`, `KSTACK_SIZE`, v.v. |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | Section `.user_stub`, input pattern `.bss.proc_pgd` aligned 16 KB |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | Tương tự kernel_qemu.ld |
+| [kernel/main.c](../../kernel/main.c) | Gọi `process_init_all()`, tests T7/T8/T9 |
 
 ### Điểm chính
 
@@ -491,9 +493,9 @@ Thêm 3 test vào `run_boot_tests`:
 **Kết quả trên QEMU:**
 
 ```
-[PROC] pid=0 name=counter pgd=0x70108000 kstack=0x70114210 user_pa=0x70200000
-[PROC] pid=1 name=runaway pgd=0x7010c000 kstack=0x70116210 user_pa=0x70300000
-[PROC] pid=2 name=shell   pgd=0x70110000 kstack=0x70118210 user_pa=0x70400000
+[PROC] pid=0 name=counter pgd=0xc0108000 kstack=0xc0114210 user_pa=0x70200000
+[PROC] pid=1 name=runaway pgd=0xc010c000 kstack=0xc0116210 user_pa=0x70300000
+[PROC] pid=2 name=shell   pgd=0xc0110000 kstack=0xc0118210 user_pa=0x70400000
 ...
 [TEST] [PASS] T7 PCB array (3 processes)
 [TEST] [PASS] T8 L1 mappings (null+user+kern OK, 3 distinct user PAs)
@@ -501,9 +503,11 @@ Thêm 3 test vào `run_boot_tests`:
 [TEST] ========== 9 passed, 0 failed ==========
 ```
 
-- PGD 16 KB-aligned (0x70108000, 0x7010C000, 0x70110000)
-- User PA = `RAM_BASE + 0x200000 + i * 0x100000` đúng spec memory-architecture
-- 3 user PDE phân biệt → PA isolation thật
+- `pgd` in ở **VA cao** (`0xc0108000`, `0xc010c000`, `0xc0110000`) vì linker emit symbol
+  ở VA. 16 KB-aligned vẫn giữ (offset giữa VA và PA là bội 16 KB).
+- `pgd_pa` (không in trong boot log, nhưng lưu trong PCB) = `pgd - PHYS_OFFSET` — đó là
+  giá trị TTBR0 sẽ nhận khi context switch.
+- `user_pa` vẫn in ở PA: user region dùng PA cho isolation, không lệ thuộc linker.
 
 **Chưa test (thuộc chapter sau):**
 - Process thực sự chạy — chưa có context switch
@@ -519,19 +523,11 @@ Thêm 3 test vào `run_boot_tests`:
 
 | File | Vai trò |
 |------|---------|
-| [kernel/include/proc.h](../../../kernel/include/proc.h) | Public types + API |
-| [kernel/proc/process.c](../../../kernel/proc/process.c) | Static init logic |
-| [kernel/arch/arm/proc/user_stub.S](../../../kernel/arch/arm/proc/user_stub.S) | User stub source |
-| [kernel/arch/arm/mm/pgtable.c](../../../kernel/arch/arm/mm/pgtable.c) | `pgtable_build_for_proc` |
-| [kernel/main.c](../../../kernel/main.c) | Wire + tests |
-
-### Reference
-
-- **VinixOS** — same BBB target, đã run thật. Tham khảo PCB layout (`task_context` với
-  banked user registers), initial stack frame pattern: [docs_trainingAI/refOS_source/VinixOS/kernel/include/task.h](../../../docs_trainingAI/refOS_source/VinixOS/kernel/include/task.h)
-- **Linux ARM 32-bit** — mô hình per-process page table + per-process kernel stack.
-  RingNova theo pattern này (khác VinixOS ở chỗ VinixOS dùng chung PGD)
-- ARM ARM B3.17 — Banked registers, mode transition
+| [kernel/include/proc.h](../../kernel/include/proc.h) | Public types + API |
+| [kernel/proc/process.c](../../kernel/proc/process.c) | Static init logic |
+| [kernel/arch/arm/proc/user_stub.S](../../kernel/arch/arm/proc/user_stub.S) | User stub source |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | `pgtable_build_for_proc` |
+| [kernel/main.c](../../kernel/main.c) | Wire + tests |
 
 ### Dependencies
 
@@ -544,8 +540,9 @@ Thêm 3 test vào `run_boot_tests`:
 
 ### Tiếp theo
 
-**Chapter 05 — Context Switch + Scheduler →** PCB đã dựng xong, nhưng CPU vẫn chưa chạm
+**Chapter 06 — Scheduler + Context Switch →** PCB đã dựng xong, nhưng CPU vẫn chưa chạm
 vào chúng. Chapter sau viết assembly `context_switch.S`: save register của prev vào
 `prev->ctx`, swap TTBR0 sang `next->pgd_pa`, flush TLB, restore register từ `next->ctx`,
-atomic pop về user mode. Kèm scheduler round-robin gọi từ timer IRQ — lần đầu tiên 3
-process thực sự interleave trên terminal.
+atomic pop về user mode. Vì kernel chạy ở VA cao từ boot, swap TTBR0 không cần trampoline
+— PC trong `0xC0...` chia sẻ giữa mọi PGD. Kèm scheduler round-robin gọi từ timer IRQ —
+lần đầu tiên 3 process thực sự interleave trên terminal.

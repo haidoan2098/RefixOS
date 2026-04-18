@@ -53,29 +53,36 @@ Module có dấu ★ là **mới trong chapter này**.
          CPU · RAM · UART · ★ INTC · ★ Timer (firing)
 ```
 
-**Flow khởi động hiện tại:**
+**Flow khởi động hiện tại — kernel linked ở VA cao `0xC0000000`:**
 
 ```mermaid
 flowchart LR
-    A[Reset] --> B[start.S]
-    B --> C[kmain]
+    A[Reset] --> B[start.S<br/>stacks+BSS@PA]
+    B --> E[mmu_init<br/>@PA — câm]
+    E --> T["ldr pc, =_start_va<br/>trampoline"]
+    T --> C[kmain<br/>@VA]
     C --> D[uart_init]
-    D --> E[mmu_init]
-    E --> F[exception_init]
+    D --> MP[mmu_print_status]
+    MP --> F[exception_init]
     F --> G["★ irq_init<br/>(INTC reset,<br/>mask all)"]
     G --> H["★ timer_init<br/>(10 ms period)"]
     H --> I["★ irq_register<br/>+ irq_enable<br/>+ irq_cpu_enable"]
-    I --> J["boot self-tests<br/>T1–T6"]
-    J --> K[idle loop<br/>timer ticks]
+    I --> J["boot self-tests<br/>T1–T9"]
+    J --> DI[mmu_drop_identity]
+    DI --> K[idle loop<br/>timer ticks]
 
     style G fill:#ffe699,stroke:#e8a700,color:#000
     style H fill:#ffe699,stroke:#e8a700,color:#000
     style I fill:#ffe699,stroke:#e8a700,color:#000
 ```
 
-Điểm mới: sau khi MMU bật và VBAR cài xong, kernel lần đầu bật IRQ toàn cục (`CPSR.I=0`).
-Từ `irq_cpu_enable()` trở đi, timer fire mỗi 10 ms → `handle_irq` chạy → `tick_count++` →
-handler quay lại code bị ngắt. Kernel không còn "mù" nữa.
+Điểm mới của chapter này: sau khi MMU bật + VBAR cài, kernel lần đầu bật IRQ toàn cục
+(`CPSR.I=0`). Từ `irq_cpu_enable()` trở đi, timer fire mỗi 10 ms → `handle_irq` chạy →
+`tick_count++` → handler quay lại code bị ngắt. Kernel không còn "mù" nữa.
+
+**Lưu ý về thứ tự:** `mmu_init` chạy từ `start.S` (trước `kmain`), không phải từ `kmain` —
+vì `uart_printf` dùng VA string literal, không hoạt động pre-MMU. Log MMU được `kmain`
+phát lại sau khi UART sẵn sàng, qua `mmu_print_status()`. Xem Chapter 03 cho chi tiết.
 
 ---
 
@@ -207,10 +214,9 @@ QEMU `realview-pb-a8` và BeagleBone Black dùng hai bộ interrupt controller k
 | QEMU | ARM GIC v1 | CPU @ `0x1E000000`, Dist @ `0x1E001000` | 96 | Distributor + CPU interface tách đôi; IAR/EOIR protocol |
 | BBB  | AM335x INTC | `0x48200000` | 128 | 4 bank × 32 bit; NEWIRQAGR single-write EOI |
 
-**Lưu ý về QEMU**: tài liệu cũ của RealView Platform Baseboard dùng PL190 VIC — nhưng QEMU
-machine `realview-pb-a8` (khác với `realview-eb`) wire up **GIC v1** (`TYPE_REALVIEW_GIC`
-trong `hw/arm/realview.c`), không phải PL190. SP804 TIMER0_1 tương ứng với **SPI #4**, mà
-trên GIC thì SPI offset là 32 → IRQ ID = **36**. Trên BBB, DMTIMER2 là IRQ **68**.
+**Lưu ý về QEMU**: machine `realview-pb-a8` wire up **GIC v1** (không phải PL190 VIC
+như variant `realview-eb`). SP804 TIMER0_1 tương ứng với **SPI #4**; trên GIC SPI offset
+là 32 → IRQ ID = **36**. Trên BBB, DMTIMER2 là IRQ **68**.
 
 Vì hai backend khác nhau, driver che giấu phía sau một API thống nhất:
 
@@ -393,15 +399,15 @@ tiếp theo đều bị block.
 
 | File | Nội dung |
 |------|----------|
-| [kernel/include/irq.h](../../../kernel/include/irq.h) | API dispatch + `IRQ_TIMER` per-platform |
-| [kernel/drivers/intc/intc.h](../../../kernel/drivers/intc/intc.h) | Interface 5 hàm INTC |
-| [kernel/drivers/intc/intc.c](../../../kernel/drivers/intc/intc.c) | GIC v1 (QEMU) + AM335x INTC + dispatcher |
-| [kernel/drivers/timer/timer.h](../../../kernel/drivers/timer/timer.h) | API timer |
-| [kernel/drivers/timer/timer.c](../../../kernel/drivers/timer/timer.c) | SP804 (QEMU) + DMTIMER2 (BBB) |
-| [kernel/arch/arm/exception/exception_entry.S](../../../kernel/arch/arm/exception/exception_entry.S) | `exception_entry_irq` rewrite (srsdb/rfefd) |
-| [kernel/arch/arm/exception/exception_handlers.c](../../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` → `irq_dispatch()` |
-| [kernel/include/board.h](../../../kernel/include/board.h) | `GIC_*_BASE`, `CM_PER_BASE`, `TIMER_CLK_HZ` |
-| [kernel/arch/arm/mm/pgtable.c](../../../kernel/arch/arm/mm/pgtable.c) | Map thêm 1 section cho GIC @ `0x1E000000` |
+| [kernel/include/irq.h](../../kernel/include/irq.h) | API dispatch + `IRQ_TIMER` per-platform |
+| [kernel/drivers/intc/intc.h](../../kernel/drivers/intc/intc.h) | Interface 5 hàm INTC |
+| [kernel/drivers/intc/intc.c](../../kernel/drivers/intc/intc.c) | GIC v1 (QEMU) + AM335x INTC + dispatcher |
+| [kernel/drivers/timer/timer.h](../../kernel/drivers/timer/timer.h) | API timer |
+| [kernel/drivers/timer/timer.c](../../kernel/drivers/timer/timer.c) | SP804 (QEMU) + DMTIMER2 (BBB) |
+| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | `exception_entry_irq` rewrite (srsdb/rfefd) |
+| [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` → `irq_dispatch()` |
+| [kernel/include/board.h](../../kernel/include/board.h) | `GIC_*_BASE`, `CM_PER_BASE`, `TIMER_CLK_HZ` |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Map thêm 1 section cho GIC @ `0x1E000000` |
 
 ### Điểm chính
 
@@ -437,7 +443,7 @@ uint32_t count  = period_us * (TIMER_CLK_HZ / 1000000U);  /* BBB: * 24 */
 uint32_t reload = (uint32_t)(0U - count);                  /* = -count  */
 ```
 
-Với 10 ms @ 24 MHz: count = 240000, reload = 0xFFFB15A1 — trùng với VinixOS tính trên BBB thật.
+Với 10 ms @ 24 MHz: count = 240000, reload = 0xFFFB15A1.
 
 **IRQ entry rewrite** — thay thế logic cũ (halt sau handler) bằng srsdb/rfefd. Diff ngắn
 nhưng thay đổi toàn bộ luồng: trước đây context ở IRQ stack, giờ ở SVC stack.
@@ -494,19 +500,12 @@ tick → fail sớm thay vì treo.
 
 | File | Vai trò |
 |------|---------|
-| [kernel/drivers/intc/](../../../kernel/drivers/intc/) | INTC driver + dispatch |
-| [kernel/drivers/timer/](../../../kernel/drivers/timer/) | Timer driver |
-| [kernel/include/irq.h](../../../kernel/include/irq.h) | Public API + IRQ constants |
-| [kernel/arch/arm/exception/exception_entry.S](../../../kernel/arch/arm/exception/exception_entry.S) | IRQ entry (srsdb/rfefd) |
-| [kernel/arch/arm/exception/exception_handlers.c](../../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` dispatch |
-| [kernel/main.c](../../../kernel/main.c) | Wire + T6 |
-
-### Reference
-
-- VinixOS INTC + DMTIMER2 driver đã chạy trên BBB thật — [docs_trainingAI/refOS_source/VinixOS/kernel/src/drivers/](../../../docs_trainingAI/refOS_source/VinixOS/kernel/src/drivers/)
-- QEMU realview-pb-a8 GIC wiring: `hw/arm/realview.c` (`TYPE_REALVIEW_GIC` @ 0x1E000000, num-irq=96)
-- AM335x TRM §6 (INTC) và §20 (DMTIMER)
-- ARM IHI 0048 — GIC Architecture Specification (v1)
+| [kernel/drivers/intc/](../../kernel/drivers/intc/) | INTC driver + dispatch |
+| [kernel/drivers/timer/](../../kernel/drivers/timer/) | Timer driver |
+| [kernel/include/irq.h](../../kernel/include/irq.h) | Public API + IRQ constants |
+| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | IRQ entry (srsdb/rfefd) |
+| [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` dispatch |
+| [kernel/main.c](../../kernel/main.c) | Wire + T6 |
 
 ### Dependencies
 

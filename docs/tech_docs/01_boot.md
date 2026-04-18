@@ -93,7 +93,10 @@ Interrupt fire khi đang setup → CPU nhảy vào handler chưa tồn tại →
 
 ```
 Trạng thái CPU lúc này:
-- PC      : trỏ vào _start (physical address)
+- PC      : trỏ vào byte đầu của image (physical address, LMA)
+            — ELF e_entry đặt = LMA = 0x70100000 (QEMU) / 0x80000000 (BBB)
+            Symbol `_start` trong ELF resolve ra VA 0xC0100000, nhưng lúc này
+            MMU off nên PC phải là PA để CPU tìm được code.
 - MMU     : OFF — mọi address là physical
 - IRQ/FIQ : trạng thái không xác định (có thể đang enabled)
 - SP      : chưa set — chứa giá trị rác
@@ -123,23 +126,37 @@ Nếu không giải quyết ở bước này:
 
 ```mermaid
 flowchart TD
-    A["_start<br/>(CPU mới vào)"] --> B["cpsid if<br/>Mask IRQ + FIQ"]
-    B --> C["Setup exception stacks<br/>FIQ → IRQ → ABT → UND → SVC"]
-    C --> D["Zero BSS<br/>_bss_start → _bss_end"]
-    D --> E["bl kmain<br/>Nhảy vào C — không return"]
+    A["_start<br/>(CPU vào ở PA)"] --> B["cpsid if<br/>Mask IRQ + FIQ"]
+    B --> P["Compute PHYS_OFFSET<br/>adr _start + ldr =_start"]
+    P --> C["Setup SVC stack at PA<br/>ldr =_svc_stack_top + sub PHYS_OFFSET"]
+    C --> D["Zero BSS at PA<br/>(VA symbols → PA via sub)"]
+    D --> M["bl mmu_init(phys_offset)<br/>build pgd via PA, enable MMU"]
+    M --> T["ldr pc, =_start_va<br/>trampoline PC → high VA"]
+    T --> V["_start_va<br/>Setup all mode stacks at VA"]
+    V --> E["bl kmain<br/>Kernel chạy ở VA"]
     E --> F["Halt loop<br/>Safety net"]
+
+    style M fill:#ffe699,stroke:#e8a700,color:#000
+    style T fill:#ffe699,stroke:#e8a700,color:#000
 ```
 
 **Thứ tự bắt buộc, không đảo được:**
 
 1. Mask interrupt **trước tiên** — ngăn IRQ fire khi chưa sẵn sàng
-2. Setup stacks — C cần stack để chạy function
-3. Zero BSS — C cần BSS = 0 cho global variables
-4. Jump C — mọi điều kiện đã đủ
+2. Compute PHYS_OFFSET — cần để convert VA symbol thành PA address trong khi MMU off
+3. Setup SVC stack (PA) — đủ để C function `mmu_init` có stack
+4. Zero BSS (PA) — C cần BSS = 0 cho global variables
+5. `bl mmu_init` — bật MMU (chi tiết Chapter 03). Sau khi return, MMU on, PC vẫn ở PA
+   qua identity map
+6. `ldr pc, =_start_va` — trampoline PC từ PA sang VA cao (literal pool chứa VA 0xC01...)
+7. Setup 4 mode stack còn lại (FIQ/IRQ/ABT/UND) + lặp lại SVC stack — giờ ở VA
+8. `bl kmain` — kernel chạy hoàn toàn ở VA
 
-Nếu đảo 1 và 2: interrupt fire khi đang set SP → crash.
-Nếu đảo 2 và 4: C chạy mà chưa có stack → crash.
-Nếu bỏ 3: global variable có giá trị rác → bug âm thầm.
+Nếu đảo 1 và 3: interrupt fire khi đang set SP → crash.
+Nếu đảo 3 và 8: C chạy mà chưa có stack → crash.
+Nếu bỏ 4: global variable có giá trị rác → bug âm thầm.
+Nếu bỏ 6 (trampoline): kernel chạy tiếp ở PA qua identity, `&kmain` in ra PA nhưng
+MMU thật sự không được dùng — đó là state "nửa nạc nửa mỡ" mà thiết kế này tránh.
 
 ### Tại sao 5 exception stacks?
 
@@ -311,68 +328,98 @@ bắt đầu và kết thúc ở đâu trong RAM.
 `strlo` = store if lower (cmp r0, r1 → nếu r0 < r1 thì store). `[r0], #4` = ghi vào
 address r0 rồi tăng r0 thêm 4 (post-increment). Hiệu quả: ghi 0, tiến 4 byte, lặp.
 
-**Block 4 — Jump to C:**
+**Block 4 — Jump to mmu_init, trampoline, then kmain:**
 
 ```asm
-bl      kmain
+mov     r0, r4                  @ r0 = phys_offset
+bl      mmu_init                @ PC-relative, runs at PA
+
+ldr     pc, =_start_va          @ absolute load = VA trampoline
+
+_start_va:
+    /* re-setup all mode stacks at VA */
+    ...
+    bl      kmain
 ```
 
-`bl` = branch and link — lưu địa chỉ quay về vào LR, nhảy đến `kmain`.
+`bl mmu_init` là PC-relative — offset = (VA_target − VA_bl) giống chênh lệch PA, nên
+call này chạy ở PA. Bên trong `mmu_init`, kernel build `boot_pgd` qua PA pointer và
+flip `SCTLR.M=1`. MMU on ngay lập tức, identity map giữ PC sống sót ở PA cho đến hết
+function, rồi return về `_start`.
+
+`ldr pc, =_start_va` load literal `_start_va` (VA cao `0xC01000..`) rồi jump. Đây là
+khoảnh khắc trampoline: instruction kế tiếp fetch qua MMU tại VA. Từ nhãn `_start_va`
+trở đi, mọi thứ chạy ở VA.
+
 `kmain` không bao giờ return. Nếu nó return (bug), CPU rơi vào halt loop:
 
 ```asm
 .Lhalt:
+    wfi
     b       .Lhalt
 ```
 
 Vòng lặp vô hạn — safety net. Tốt hơn chạy vào instruction rác.
 
-### Linker script — Bản đồ memory
+### Linker script — Bản đồ memory (dual MEMORY VMA/LMA)
 
 File: `kernel/linker/kernel_qemu.ld` (QEMU) / `kernel/linker/kernel_bbb.ld` (BBB)
 
-Linker script nói với linker: **đặt code, data, stacks ở đâu trong RAM**.
+Linker script nói với linker hai việc:
 
-Lấy QEMU làm ví dụ:
+1. **Bytes được load ở đâu** (LMA — load memory address): chỗ QEMU/SPL copy ảnh kernel.
+2. **Symbol resolve ở đâu** (VMA — virtual memory address): chỗ code runtime trỏ tới.
+
+Hai địa chỉ này **khác nhau**: LMA là PA trong RAM (để QEMU/SPL biết đặt bytes ở đâu),
+VMA là VA cao `0xC0100000` (để symbol resolve qua MMU khi kernel chạy). Linker đạt được
+bằng cách khai báo 2 MEMORY region:
 
 ```
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x70100000, LENGTH = 127M
+    /* PHYS — QEMU -kernel load image vào đây (LMA) */
+    PHYS (rwx) : ORIGIN = 0x70100000, LENGTH = 127M
+
+    /* VIRT — symbol resolve tại đây (VMA) */
+    VIRT (rwx) : ORIGIN = 0xC0100000, LENGTH = 127M
+}
+
+SECTIONS {
+    .text : { ... } > VIRT AT> PHYS    /* VMA=VIRT, LMA=PHYS */
+    ...
 }
 ```
 
-Kernel bắt đầu tại 0x70100000. 1 MB đầu (0x70000000–0x700FFFFF) để trống — dành cho
-exception vector table và peripheral map sau này.
+`> VIRT AT> PHYS` nghĩa là "rải VMA trong VIRT, LMA trong PHYS song song". ELF output có
+2 cột address — `objdump -h` in VMA `0xc010xxxx` cùng LMA `0x7010xxxx`.
 
-Sections được sắp xếp tuần tự trong RAM:
+**Entry point** (`ENTRY(_start_phys)` + `_start_phys = LOADADDR(.text);`) đặt `e_entry`
+trong ELF header bằng PA, không phải VA của `_start`. QEMU đọc e_entry đặt PC ban đầu —
+MMU off nên phải là PA.
 
+Sections được sắp xếp (VMA trong VIRT, LMA trong PHYS tương ứng):
+
+```text
+VMA 0xC0100000  ┌──────────────────┐  LMA 0x70100000
+                │ .text            │  code + rodata
+                │  .text.start     │  ← _start
+                │  .text.*         │
+                ├──────────────────┤
+                │ .user_stub       │  user code template
+                ├──────────────────┤
+                │ .data            │  biến global đã khởi tạo
+                ├──────────────────┤
+                │ .bss  (NOLOAD)   │  boot_pgd (16 KB aligned), proc_pgd, others
+                ├──────────────────┤
+                │ .stack (NOLOAD)  │  FIQ 512 · IRQ 1K · ABT 1K · UND 1K · SVC 8K
+                ├──────────────────┤
+                │ _heap_start      │  (future kmalloc)
+                ▼                  ▼
 ```
-0x70100000  ┌──────────────────┐
-            │ .text            │  code + rodata
-            │  .text.start     │  ← _start PHẢI ở đây (đầu tiên)
-            │  .text.*         │
-            ├──────────────────┤
-            │ .data            │  biến global đã khởi tạo
-            ├──────────────────┤
-            │ .bss  (NOLOAD)   │  biến global chưa khởi tạo
-            ├──────────────────┤
-            │ .stack (NOLOAD)  │  exception stacks
-            │  FIQ   512 B    │
-            │  IRQ   1 KB     │
-            │  ABT   1 KB     │
-            │  UND   1 KB     │
-            │  SVC   8 KB     │
-            ├──────────────────┤
-            │ _heap_start      │  (future)
-            ▼                  ▼
-```
 
-`.text.start` **phải đứng đầu** `.text` section. Lý do: QEMU/SPL nhảy đến address đầu tiên
-trong RAM (ORIGIN). Nếu `_start` không ở đó, CPU chạy vào data hoặc function khác → crash.
-
-Stack section dùng `NOLOAD` — nó chiếm address space trong RAM nhưng không có dữ liệu
-trong file ELF. `PROVIDE(_fiq_stack_top = .)` export symbol cho `start.S` sử dụng.
+Stack section dùng `NOLOAD` — chiếm VMA nhưng không có bytes trong ELF. `PROVIDE(_fiq_stack_top = .)`
+export symbol cho `start.S`. Các symbol này resolve ra **VA** — pre-MMU start.S phải sub
+PHYS_OFFSET để ra PA.
 
 ### UART driver — Nói chuyện với thế giới bên ngoài
 

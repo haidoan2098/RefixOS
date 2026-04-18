@@ -49,29 +49,37 @@ Module có dấu ★ là **mới trong chapter này**, còn lại đã có từ 
               CPU · RAM · UART · (timer/INTC chưa dùng)
 ```
 
-**Flow khởi động hiện tại:**
+**Flow khởi động hiện tại — kernel linked ở VA cao `0xC0000000`:**
 
 ```mermaid
 flowchart LR
-    A[Reset] --> B[start.S<br/>setup stacks<br/>zero BSS]
-    B --> C[kmain]
+    A[Reset] --> B[start.S<br/>stacks@PA<br/>zero BSS]
+    B --> E["★ mmu_init phys_offset<br/>build pgd via PA<br/>enable MMU"]
+    E --> T["★ ldr pc, =_start_va<br/>trampoline PC<br/>→ high VA"]
+    T --> V[_start_va<br/>stacks@VA]
+    V --> C[kmain]
     C --> D[uart_init]
-    D --> E["★ mmu_init<br/>(build pgd,<br/>enable MMU)"]
-    E --> F[exception_init<br/>set VBAR]
-    F --> G["★ boot self-tests<br/>T1–T5"]
-    G --> H[idle loop]
+    D --> F[exception_init<br/>set VBAR]
+    F --> G["★ boot self-tests<br/>T1–T9"]
+    G --> D2["★ mmu_drop_identity<br/>remove PA range"]
+    D2 --> H[idle loop]
 
     style E fill:#ffe699,stroke:#e8a700,color:#000
+    style T fill:#ffe699,stroke:#e8a700,color:#000
     style G fill:#ffe699,stroke:#e8a700,color:#000
+    style D2 fill:#ffe699,stroke:#e8a700,color:#000
 ```
 
-Điểm mới: `mmu_init()` chạy **trước** `exception_init()`. Exception handler cần UART để in,
-UART register cần được mapped qua MMU — nên MMU phải bật trước. Nếu `mmu_init()` sai, exception
-handler chưa set, kernel crash câm? Không — UART register nằm trong identity map (PA=VA), nên
-nếu MMU fault xảy ra trước khi VBAR set, CPU nhảy về default vector. Nhưng exception stacks
-đã setup sẵn (start.S), nên ít nhất CPU không triple-fault ngay. Thực tế, trên QEMU default
-vector ở 0x00 thường gây hang — đây là trade-off: nếu muốn an toàn tuyệt đối thì set VBAR
-trước, nhưng cần UART mapped. Ưu tiên: UART available > VBAR set.
+Điểm cốt lõi của thiết kế này:
+
+1. **`mmu_init` gọi trước `uart_init`**. UART không thể hoạt động trước MMU trong schema mới
+   vì bản thân `uart_printf()` dereference string literal ở VA — VA unmapped trước khi MMU bật.
+   Giải pháp: `mmu_init()` chạy câm (không `uart_printf`), enable MMU, rồi kmain mới init UART
+   và in log. Prints về MMU layout được `mmu_print_status()` phát lại từ kmain.
+2. **Trampoline `ldr pc, =_start_va`** nhảy PC từ PA (nơi `start.S` đang chạy qua identity map)
+   sang VA cao sau khi MMU bật. Từ đó mọi instruction fetch đi qua MMU.
+3. **`mmu_drop_identity()`** cắt bỏ identity PA sau self-tests. Stray PA deref về sau sẽ fault
+   ngay — exposes bug, không âm thầm.
 
 ---
 
@@ -118,17 +126,25 @@ Kernel không cần "cấm" user program bằng code. Kernel chỉ cần **khôn
 ## Bối cảnh
 
 ```
-Trạng thái CPU lúc này:
-- PC        : trong kmain, đã in boot log
-- MMU       : OFF — mọi address là physical
+Trạng thái CPU ngay trước khi mmu_init chạy:
+- PC        : trong start.S, sau khi setup SVC stack + zero BSS
+              (PC-relative, nằm trong image ở PA)
+- MMU       : OFF — mọi address CPU gửi ra bus là physical
 - IRQ/FIQ   : masked
-- SP        : SVC stack (PA), đang chạy C code
-- Exception : handler đã set (Chapter 02) — Data Abort in DFAR/DFSR
-- UART      : hoạt động, debug output sẵn sàng
+- SP        : SVC stack (tạm ở PA — đủ cho mmu_init)
+- Exception : VBAR chưa set → nếu crash, default vector @ 0 → hang
+- UART      : chưa init (uart_printf dùng VA string → không dùng được)
 ```
 
-Mọi address kernel dùng — `0x70100000` (QEMU) hay `0x80000000` (BBB) — đều là physical
-address trực tiếp. CPU gửi thẳng lên bus, không qua bất kỳ bước dịch nào.
+Kernel image được load tại PA (`0x70100000` QEMU, `0x80000000` BBB) nhưng **linker emit
+symbol ở VA cao** (`0xC0100000` / `0xC0000000`). Trước khi MMU bật:
+
+- CPU fetch instruction qua PA (identity giữa LMA bytes và physical RAM).
+- Mọi `ldr rX, =sym` load **VA** từ literal pool — dereference VA đó sẽ crash.
+
+Đó là lý do `start.S` phải dùng PC-relative (`adr _start` + `sub PHYS_OFFSET`) để chạm
+stack/BSS pre-MMU, và `mmu_init` phải nhận `phys_offset` làm đối số để convert `boot_pgd`
+VA → PA trước khi ghi.
 
 ---
 
@@ -162,10 +178,10 @@ ARMv7-A MMU hỗ trợ 2 cấp page table:
   mỗi entry L2 map 4 KB.
 
 RingNova chọn **section mapping (1 MB)** vì:
+
 - 3 process, mỗi process 1 MB memory → 1 section descriptor cho mỗi process
 - Kernel image < 1 MB hiện tại → vài section đủ
 - Không cần L2 table → giảm complexity, ít memory, ít bug
-- VinixOS cũng chỉ dùng section mapping và đã chạy trên BBB thật
 
 **Trade-off:** lãng phí nếu process chỉ cần 100 KB nhưng vẫn chiếm 1 MB entry. Chấp nhận
 được cho 3 process static.
@@ -201,46 +217,46 @@ boot_pgd[4096]:    4096 entries × 4 bytes = 16 KB
 value 0 có bits [1:0] = `0b00` = FAULT type. Không cần code đặc biệt cho NULL guard —
 nó có sẵn miễn phí.
 
-### Identity map — tại sao cần, tại sao giữ permanent
+### Identity map — tại sao cần, chỉ sống trong boot window
 
-**Bài toán con gà và quả trứng:** khi CPU thực thi instruction `mcr ... SCTLR` để bật MMU,
-PC đang trỏ vào physical address (ví dụ `0x70100XXX`). Instruction kế tiếp (ngay sau ISB)
-cũng ở `0x7010XXXX`. Nếu MMU bật mà `0x7010XXXX` không có trong page table → **Data Abort
-ngay instruction đầu tiên sau khi bật**.
+**Bài toán con gà và quả trứng:** khi CPU thực thi `mcr ... SCTLR` để bật MMU, PC đang ở
+PA (ví dụ `0x70100XXX`). Instruction kế tiếp (ngay sau ISB) cũng được fetch từ `0x7010XXXX`.
+Nếu MMU bật mà `0x7010XXXX` không có trong page table → **Prefetch Abort ngay instruction
+đầu tiên sau khi bật**.
 
-Giải pháp: **identity map** — map VA `0x7010XXXX` → PA `0x7010XXXX`. Sau khi MMU bật, CPU
-fetch ở VA `0x7010XXXX`, MMU dịch → PA `0x7010XXXX` (giống nhau) → hoạt động bình thường.
+Giải pháp: **identity map** — map VA `0x7010XXXX` → PA `0x7010XXXX` trong boot_pgd. Sau
+khi MMU bật, CPU fetch ở VA `0x7010XXXX`, MMU dịch → PA `0x7010XXXX` (giống nhau) → sống
+tiếp được.
 
-**Tại sao giữ permanent (không xóa)?**
+**Identity chỉ cần "bắc cầu" ngắn:**
 
-Linker script hiện tại dùng VMA = LMA = PA — tất cả symbol (`uart_printf`, `_text_start`,
-`handle_data_abort`, ...) đều có address là physical address. Khi C code load một symbol:
+Kernel linked ở VA cao (VMA = `0xC0000000`+), image load ở PA (LMA = `0x7010...` /
+`0x8000...`). Vòng đời identity:
 
-```c
-/* Compiler sinh ra: ldr r0, =uart_printf (literal pool chứa PA) */
-uart_printf("hello");
-```
+1. **Pre-MMU:** `start.S` chạy ở PA qua LMA. Identity chưa cần (MMU off).
+2. **MMU enable:** `mmu_enable` flip `SCTLR.M=1`. PC vẫn ở PA → cần identity để instruction
+   kế tiếp fetch được.
+3. **Trampoline:** `ldr pc, =_start_va` load literal VA vào PC → PC nhảy sang VA cao.
+   Từ đây kernel chạy qua high-VA alias (`0xC0...`).
+4. **Post-trampoline:** identity không còn dùng. Mọi symbol trong code đều resolve ra VA.
+5. **`mmu_drop_identity()`** (gọi từ kmain sau self-tests): xoá entries `[0x700..0x77F]`
+   và flush TLB. Stray PA deref sau điểm này → Data Abort, bug lộ ngay.
 
-`ldr r0, =uart_printf` load **PA** từ literal pool vào r0. Nếu xóa identity map, PA đó
-không còn valid → kernel crash khi gọi bất kỳ function qua pointer.
-
-Để xóa identity map thật, cần **đổi linker script** cho VMA = 0xC0000000 (giống Linux) —
-tất cả symbol sẽ ở VA, compiler sinh code dùng VA, identity map chỉ cần tạm thời lúc boot.
-Đây là refactor lớn, nằm ngoài scope chapter 03.
-
-**Branch instruction (bl, b) không bị ảnh hưởng** — chúng dùng PC-relative offset. Offset
-giữa 2 symbol giống nhau dù đo từ PA hay VA (vì toàn bộ image shift đều). Chỉ absolute load
-(`ldr rX, =symbol`) mới bị.
+**Branch instruction (`bl`, `b`) không đụng tới identity** — dùng PC-relative offset. Offset
+giữa hai symbol là compile-time constant (chênh lệch VA = chênh lệch PA vì image shift đều).
+Chỉ absolute load (`ldr rX, =symbol`) mới load literal VA.
 
 ### High VA alias — 0xC0000000
 
-Ngoài identity map, page table cũng map VA `0xC0000000` → PA `RAM_BASE`. Cùng physical
-memory, 2 VA aliases. Mục đích:
+Page table map VA `0xC0000000` → PA `RAM_BASE`. Đây là **nơi kernel thực sự chạy sau
+trampoline**, không phải alias aspirational. Vai trò:
 
-- Chapter 05 (Process) sẽ tạo per-process page table. Kernel region ở `0xC0000000` **giống
-  nhau** trong mọi page table. User region ở `0x40000000` khác nhau per-process. Khi context
-  switch, chỉ swap user entries — kernel entries cố định.
-- Convention Linux ARM: kernel ở top 1 GB (0xC0000000–0xFFFFFFFF), user ở bottom 3 GB.
+- Symbol resolve: `&kmain = 0xC01xxxxx`, `&uart_printf = 0xC01xxxxx`, v.v. Compiler sinh
+  code dùng VA, instruction fetch qua MMU tại high VA.
+- Per-process page table (Chapter 04): mỗi process có L1 table riêng, **không** có identity
+  RAM — chỉ có `0xC0000000+` (kernel), peripherals, và user section ở `0x40000000`. Context
+  switch swap TTBR0 không cần trampoline vì PC đã ở high VA sẵn.
+- Convention Linux ARM 3G/1G: kernel ở top 1 GB (`0xC0000000–0xFFFFFFFF`), user ở bottom 3 GB.
 
 ### Section descriptor format
 
@@ -340,10 +356,11 @@ flowchart TD
 
 | File | Nội dung |
 |------|----------|
-| [kernel/include/mmu.h](../../../kernel/include/mmu.h) | Section descriptor macros, VA constants, API prototypes |
-| [kernel/arch/arm/mm/pgtable.c](../../../kernel/arch/arm/mm/pgtable.c) | `boot_pgd[4096]` + `mmu_build_boot_pgd()` |
-| [kernel/arch/arm/mm/mmu_enable.S](../../../kernel/arch/arm/mm/mmu_enable.S) | Assembly: TTBR0 → DACR → SCTLR flip → ISB |
-| [kernel/arch/arm/mm/mmu.c](../../../kernel/arch/arm/mm/mmu.c) | `mmu_init()` orchestration + CP15 readers |
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Section descriptor macros, VA constants, API prototypes |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | `boot_pgd[4096]` + `mmu_build_boot_pgd(pgd)` (nhận PA pointer) |
+| [kernel/arch/arm/mm/mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S) | Assembly: TTBR0 → DACR → SCTLR flip → ISB |
+| [kernel/arch/arm/mm/mmu.c](../../kernel/arch/arm/mm/mmu.c) | `mmu_init(phys_offset)` + `mmu_print_status` + `mmu_drop_identity` |
+| [kernel/arch/arm/boot/start.S](../../kernel/arch/arm/boot/start.S) | Pre-MMU setup, `bl mmu_init`, `ldr pc, =_start_va` trampoline |
 
 ### Điểm chính
 
@@ -372,9 +389,8 @@ Platform-specific peripheral map dùng `#ifdef PLATFORM_QEMU / PLATFORM_BBB` —
 Tất cả dùng `PDE_DEVICE` (strongly-ordered + XN).
 
 **MMU enable** — assembly routine `mmu_enable(uint32_t pgd_pa)` trong
-[mmu_enable.S](../../../kernel/arch/arm/mm/mmu_enable.S), sequence 8 bước như diagram trên.
-TTBR0 walk attributes `0x4A` = inner WB-WA + outer WB-WA + shareable — cùng giá trị VinixOS
-dùng trên BBB thật.
+[mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S), sequence 8 bước như diagram trên.
+TTBR0 walk attributes `0x4A` = inner WB-WA + outer WB-WA + shareable.
 
 **Linker script** — thêm `.bss.pgd` section vào `.bss`, align 16 KB trước placement:
 
@@ -392,14 +408,14 @@ dùng trên BBB thật.
 
 ## Testing
 
-5 boot self-tests chạy tự động mỗi lần boot, in [PASS] hoặc [FAIL]:
+Boot self-tests chạy tự động mỗi lần boot (9 tests), in [PASS] hoặc [FAIL]:
 
 | Test | Kiểm tra | Nếu fail nghĩa là |
 |------|----------|------|
 | **T1** SCTLR.M=1 | MMU thật sự bật | `mmu_enable` không ghi SCTLR đúng |
-| **T2** TTBR0 base == `&boot_pgd` | CPU đang walk đúng page table | TTBR0 load sai address |
-| **T3** VA alias read == PA read | `*0xC0100000 == *0x70100000` | High VA không trỏ về cùng physical |
-| **T4** VA alias write → PA readback | Ghi qua VA, đọc lại qua PA khớp | Write path qua alias bị lỗi (cache attrs hoặc AP sai) |
+| **T2** TTBR0 base == PA của `boot_pgd` | CPU đang walk đúng page table ở PA (`boot_pgd` symbol là VA, trừ PHYS_OFFSET ra PA để so) | TTBR0 load sai, hoặc migration quên convert VA→PA |
+| **T3** VA alias read == PA read | `*0xC0100000 == *0x70100000` — cả high VA + identity cùng trỏ về một PA | High VA map sai, hoặc identity đã bị drop sớm |
+| **T4** Identity coherence PA↔VA | Ghi qua PA (identity), đọc lại qua VA; rồi ngược lại | Identity map không write-coherent với high VA (cache attrs lệch) |
 | **T5** SVC exception return | `svc #42` → handler → return bình thường | Exception path vỡ sau khi MMU on |
 
 Thêm 1 destructive test (enable thủ công bằng `#define EXCEPTION_TEST TEST_NULL_DEREF`):
@@ -411,10 +427,15 @@ Thêm 1 destructive test (enable thủ công bằng `#define EXCEPTION_TEST TEST
 NULL test verify rằng entry 0 thật sự là FAULT — MMU chặn access thay vì ghi thành công
 (như khi MMU off trên QEMU).
 
+> **Lưu ý thứ tự:** T3 + T4 phải chạy **trước** `mmu_drop_identity()`. Sau khi identity
+> bị drop, `*((uint32_t*)0x70100000)` fault ngay. Trong `kmain`, flow là:
+> `run_boot_tests()` → `mmu_drop_identity()` — đặt sai thứ tự = test hang.
+
 **Chưa test:**
-- Execute từ high VA alias (kernel vẫn chạy ở PA vì linker VMA=PA)
-- BBB hardware (chỉ build, chưa flash)
-- Prefetch Abort qua vùng unmapped (verify ở chapter tiếp theo khi có thêm mapped regions)
+
+- Kernel execute từ PA không được phép nữa (xác nhận `mmu_drop_identity` hiệu quả) — cần
+  test case cố tình jump vào PA và verify Prefetch Abort.
+- BBB hardware (chỉ build, chưa flash).
 
 ---
 
@@ -424,13 +445,13 @@ NULL test verify rằng entry 0 thật sự là FAULT — MMU chặn access thay
 
 | File | Vai trò |
 |------|---------|
-| [kernel/include/mmu.h](../../../kernel/include/mmu.h) | Descriptor macros + API |
-| [kernel/arch/arm/mm/pgtable.c](../../../kernel/arch/arm/mm/pgtable.c) | Page table builder |
-| [kernel/arch/arm/mm/mmu_enable.S](../../../kernel/arch/arm/mm/mmu_enable.S) | Assembly enable sequence |
-| [kernel/arch/arm/mm/mmu.c](../../../kernel/arch/arm/mm/mmu.c) | Init orchestration |
-| [kernel/include/board.h](../../../kernel/include/board.h) | RAM_BASE, PHYS_OFFSET, peripheral addresses |
-| [kernel/linker/kernel_qemu.ld](../../../kernel/linker/kernel_qemu.ld) | `.bss.pgd` section placement |
-| [kernel/linker/kernel_bbb.ld](../../../kernel/linker/kernel_bbb.ld) | (same cho BBB) |
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Descriptor macros + API |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Page table builder |
+| [kernel/arch/arm/mm/mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S) | Assembly enable sequence |
+| [kernel/arch/arm/mm/mmu.c](../../kernel/arch/arm/mm/mmu.c) | Init orchestration |
+| [kernel/include/board.h](../../kernel/include/board.h) | RAM_BASE, PHYS_OFFSET, peripheral addresses |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | Dual MEMORY PHYS/VIRT, `.bss.pgd` placement, `_start_phys` e_entry |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | (same cho BBB) |
 
 ### Dependencies
 
@@ -440,5 +461,6 @@ NULL test verify rằng entry 0 thật sự là FAULT — MMU chặn access thay
 ### Tiếp theo
 
 **Chapter 04 — Interrupts →** MMU bật, peripheral addresses mapped. Giờ có thể setup INTC
-(interrupt controller) và Timer — peripheral driver đọc/ghi register qua identity-mapped VA.
+(interrupt controller) và Timer — peripheral driver đọc/ghi register qua VA (peripheral
+section vẫn identity-mapped, không bị drop bởi `mmu_drop_identity` vì chỉ RAM range bị gỡ).
 Timer interrupt là tiền đề cho preemptive scheduling (Chapter 06).
