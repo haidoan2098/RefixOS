@@ -42,7 +42,8 @@ C_SRCS := kernel/main.c \
           kernel/arch/arm/exception/exception_handlers.c \
           kernel/arch/arm/mm/mmu.c \
           kernel/arch/arm/mm/pgtable.c \
-          kernel/proc/process.c
+          kernel/proc/process.c \
+          kernel/sched/scheduler.c
 
 S_SRCS := kernel/arch/arm/boot/start.S \
           kernel/arch/arm/exception/vectors.S \

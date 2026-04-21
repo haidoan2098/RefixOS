@@ -44,6 +44,11 @@ static uint8_t proc_kstack[NUM_PROCESSES][KSTACK_SIZE]
 extern uint8_t user_stub_start[];
 extern uint8_t user_stub_end[];
 
+/* Trampoline landed on by context_switch's bx lr for first-time
+ * entries. Defined in kernel/arch/arm/exception/exception_entry.S.
+ * Pops the 16-word IRQ-exit frame and enters USR mode via rfefd. */
+extern void ret_from_first_entry(void);
+
 /* Public PCB array + current cursor */
 process_t  processes[NUM_PROCESSES];
 process_t *current;
@@ -68,37 +73,59 @@ static void kmemset(void *dst, uint8_t v, uint32_t n)
 }
 
 /* -----------------------------------------------------------
- * process_build_initial_frame — pre-construct the first frame
- * on the process's kernel stack so a future context_switch can
- * just do:
- *     msr   spsr_cxsf, ctx.spsr
- *     mov   sp, ctx.sp_svc
- *     ldmfd sp!, {r0-r12, pc}^
- * and land in user mode at user_entry with IRQ unmasked.
+ * process_build_initial_frame — pre-construct two stacked frames
+ * so that context_switch(NULL|prev, p) lands the process in USR
+ * mode at user_entry using the same code path a preempted resume
+ * uses.
  *
- * Frame layout (14 words, low→high — ldmfd pops ascending):
- *   [+0x00] r0  = 0
- *   [+0x04] r1  = 0
- *     ...
- *   [+0x30] r12 = 0
- *   [+0x34] pc  = user_entry
+ * Stack layout (low→high; stack grows down, sp_svc points low):
  *
- * sp_svc points at r0 slot. Frame sits at the top of the 8 KB
- * kernel stack (stacks grow down).
+ *   [+0x00] r4   = 0         \
+ *   [+0x04] r5   = 0          |
+ *   [+0x08] r6   = 0          |
+ *   [+0x0C] r7   = 0          |  9-word kernel-resume frame.
+ *   [+0x10] r8   = 0          |  context_switch's epilogue does
+ *   [+0x14] r9   = 0          |    ldmfd sp!, {r4-r11, lr}; bx lr
+ *   [+0x18] r10  = 0          |  which pops these 9 words and
+ *   [+0x1C) r11  = 0          |  transfers control to lr below.
+ *   [+0x20] lr   = ret_from_first_entry  /
+ *
+ *   [+0x24] r0   = 0         \
+ *     ...                     |
+ *   [+0x54] r12  = 0          |  16-word IRQ-exit frame that
+ *   [+0x58] svc_lr = 0        |  ret_from_first_entry drains via
+ *   [+0x5C] pc   = user_entry |    ldmfd sp!, {r0-r12, lr}
+ *   [+0x60] cpsr = 0x10       |    rfefd sp!
+ *                             /
+ *
+ * sp_svc = start of the 9-word kernel-resume frame. Total 25
+ * words (100 bytes) reserved at the top of the 8 KB kstack.
  * ----------------------------------------------------------- */
+#define KERNEL_RESUME_WORDS  9U     /* r4-r11 + lr */
+#define USER_EXIT_WORDS      16U    /* r0-r12 + svc_lr + pc + cpsr */
+#define INIT_STACK_WORDS     (KERNEL_RESUME_WORDS + USER_EXIT_WORDS)
+
 static void process_build_initial_frame(process_t *p)
 {
     uint32_t top = (uint32_t)p->kstack_base + p->kstack_size;
-    uint32_t *frame = (uint32_t *)(top - 14U * 4U);
+    uint32_t *frame = (uint32_t *)(top - INIT_STACK_WORDS * 4U);
 
+    /* Kernel-resume frame (indices 0..8). */
+    for (uint32_t i = 0; i < 8; i++)
+        frame[i] = 0;                              /* r4..r11 */
+    frame[8] = (uint32_t)&ret_from_first_entry;    /* lr */
+
+    /* IRQ-exit frame (indices 9..24). */
     for (uint32_t i = 0; i < 13; i++)
-        frame[i] = 0;               /* r0..r12 */
-    frame[13] = p->user_entry;      /* pc */
+        frame[9 + i] = 0;                          /* r0..r12 */
+    frame[22] = 0;                                 /* svc_lr placeholder */
+    frame[23] = p->user_entry;                     /* pc */
+    frame[24] = 0x10U;                             /* cpsr — USR, I=0 F=0 */
 
-    /* ctx starts zero from BSS; set only fields that matter */
+    /* ctx fields consumed by context_switch.S. */
     p->ctx.sp_svc = (uint32_t)frame;
     p->ctx.lr_svc = 0;
-    p->ctx.spsr   = 0x10U;          /* USR mode, I=0, F=0, T=0 */
+    p->ctx.spsr   = 0x10U;          /* mirror of frame[24] — documentary */
     p->ctx.sp_usr = USER_STACK_TOP;
     p->ctx.lr_usr = 0;
 }

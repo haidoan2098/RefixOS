@@ -25,6 +25,7 @@
 #include "include/irq.h"
 #include "include/mmu.h"
 #include "include/proc.h"
+#include "include/scheduler.h"
 
 /* Linker-provided symbols */
 extern uint32_t _text_start, _text_end;
@@ -239,31 +240,50 @@ static void run_boot_tests(void)
         }
     }
 
-    /* T9 — initial kernel stack frame is laid out for user-mode entry */
+    /* T9 — initial kernel stack = 25 words (9 kernel-resume + 16 IRQ-exit):
+     *        [0..7]   r4..r11 (zero, ignored by context_switch epilogue)
+     *        [8]      lr = &ret_from_first_entry (trampoline)
+     *        [9..21]  r0..r12 (zero)
+     *        [22]     svc_lr (zero placeholder)
+     *        [23]     user_entry (consumed by rfefd as PC)
+     *        [24]     0x10 (consumed by rfefd as CPSR) */
     {
+        extern void ret_from_first_entry(void);
         int ok = 1;
         for (uint32_t i = 0; i < NUM_PROCESSES; i++) {
             process_t *p = &processes[i];
             uint32_t *frame = (uint32_t *)p->ctx.sp_svc;
-            for (uint32_t r = 0; r < 13 && ok; r++) {
+            /* Kernel-resume frame zero check (r4..r11). */
+            for (uint32_t r = 0; r < 8 && ok; r++) {
                 if (frame[r] != 0) {
-                    uart_printf("[TEST] [FAIL] T9 pid=%u frame[%u]=0x%08x\n",
+                    uart_printf("[TEST] [FAIL] T9 pid=%u kframe[%u]=0x%08x\n",
                                 p->pid, r, frame[r]);
                     ok = 0;
                 }
             }
-            if (frame[13] != USER_VIRT_BASE
-                || p->ctx.spsr != 0x10U
+            /* IRQ-exit frame r0..r12 zero check. */
+            for (uint32_t r = 0; r < 13 && ok; r++) {
+                if (frame[9 + r] != 0) {
+                    uart_printf("[TEST] [FAIL] T9 pid=%u uframe[r%u]=0x%08x\n",
+                                p->pid, r, frame[9 + r]);
+                    ok = 0;
+                }
+            }
+            if (frame[8]  != (uint32_t)&ret_from_first_entry
+                || frame[22] != 0
+                || frame[23] != USER_VIRT_BASE
+                || frame[24] != 0x10U
                 || p->ctx.sp_usr != USER_STACK_TOP) {
-                uart_printf("[TEST] [FAIL] T9 pid=%u pc=0x%08x spsr=0x%08x "
-                            "sp_usr=0x%08x\n",
-                            p->pid, frame[13], p->ctx.spsr, p->ctx.sp_usr);
+                uart_printf("[TEST] [FAIL] T9 pid=%u lr=0x%08x pc=0x%08x "
+                            "cpsr=0x%08x sp_usr=0x%08x\n",
+                            p->pid, frame[8], frame[23], frame[24],
+                            p->ctx.sp_usr);
                 ok = 0;
             }
         }
         if (ok) {
             uart_printf("[TEST] [PASS] T9 initial stack frames "
-                        "(pc=USER_VIRT_BASE, spsr=0x10)\n");
+                        "(25 words, kernel-resume + IRQ-exit)\n");
             pass++;
         } else {
             fail++;
@@ -336,6 +356,12 @@ void kmain(void)
      * map so any future stray PA dereference faults immediately. */
     mmu_drop_identity();
 
+    /* Now the PCBs are stable (tests verified T7/T8/T9) and the
+     * VA world is tidy — arm scheduler_tick so each timer IRQ
+     * flips need_reschedule. Before this point ticks bumped
+     * tick_count but schedule() stayed a no-op. */
+    timer_set_handler(scheduler_tick);
+
     /* Destructive tests — enable ONE at a time, each halts the system */
 #define TEST_NONE       0
 #define TEST_DATA_ABORT 1
@@ -381,13 +407,10 @@ void kmain(void)
                 "(USR @ 0x%08x)\n",
                 processes[0].pid, processes[0].user_entry);
 
-    /* One-way trip into the first process's user mode. From here
-     * on the kernel only re-enters via exceptions (timer IRQ, SVC,
-     * faults). Phase 2 will add the bidirectional context_switch
-     * + scheduler that lets pid 1 and 2 get their slices. */
-    context_switch_to_user(processes[0].pgd_pa,
-                           processes[0].ctx.sp_svc,
-                           processes[0].ctx.spsr,
-                           processes[0].ctx.sp_usr);
+    /* Bootstrap the first process via the shared context_switch
+     * path (prev=NULL: no save side, load-only). Once IRQ-driven
+     * preemption is wired up, every subsequent switch takes the
+     * same route with both pointers non-null. */
+    process_first_run(&processes[0]);
     /* noreturn — code below is unreachable */
 }

@@ -111,3 +111,16 @@ exception_entry_irq:
  * =========================================================== */
 exception_entry_fiq:
     b       .
+
+/* ===========================================================
+ * ret_from_first_entry — trampoline for first-time process entry
+ *
+ * context_switch's epilogue pops {r4-r11, lr} and bx lr's here.
+ * Stack at entry points at the 16-word IRQ-exit frame that
+ * process_build_initial_frame laid down: we drain it the same
+ * way the IRQ path does and land in USR mode atomically.
+ * =========================================================== */
+    .global ret_from_first_entry
+ret_from_first_entry:
+    ldmfd   sp!, {r0-r12, lr}       /* pop r0..r12 + svc_lr placeholder */
+    rfefd   sp!                     /* pop PC + CPSR → USR mode, atomic */

@@ -17,6 +17,7 @@
  * ============================================================ */
 
 #include <stdint.h>
+#include <stddef.h>
 #include "board.h"
 
 typedef enum {
@@ -80,18 +81,45 @@ void process_init_all(void);
 /* Pretty-print one PCB over UART. Debug only. */
 void process_dump(const process_t *p);
 
-/* First user-mode entry — implemented in
- * kernel/arch/arm/proc/context_switch.S.
+/* context_switch — implemented in kernel/arch/arm/proc/context_switch.S.
  *
- * One-way trip: bootstraps the first process by swapping TTBR0,
- * loading the banked USR-mode SP, and atomically restoring the
- * pre-built initial frame via ldmfd^. Never returns.
+ * Saves prev's kernel state onto prev's SVC stack (callee-saved
+ * GPRs + lr + banked SP_usr/LR_usr) and loads the equivalent for
+ * next, then returns via bx lr — landing in whatever kernel code
+ * next was last executing when it yielded the CPU.
  *
- * Caller passes primitive fields (not the PCB pointer) so the
- * assembly avoids hard-coding struct offsets. */
-void context_switch_to_user(uint32_t pgd_pa,
-                            uint32_t sp_svc,
-                            uint32_t spsr,
-                            uint32_t sp_usr) __attribute__((noreturn));
+ * prev == NULL means "first-time entry" — no save side; caller
+ * (kmain) never needs to return. next's initial kernel stack is
+ * pre-built so the bx lr at the epilogue jumps to
+ * ret_from_first_entry, which pops the 16-word IRQ-exit frame
+ * and enters USR mode. */
+void context_switch(struct process *prev, struct process *next);
+
+/* Bootstrap helper: kick off the first process from kmain. Never
+ * returns. Equivalent to context_switch(NULL, &processes[0]). */
+static inline void __attribute__((noreturn))
+process_first_run(struct process *first)
+{
+    context_switch((void *)0, first);
+    for (;;) { /* unreachable */ }
+}
+
+/* Struct offsets used by context_switch.S — must stay in sync.
+ * _Static_assert below guards accidental layout drift. */
+#define CTX_SP_SVC_OFFSET       52
+#define CTX_LR_SVC_OFFSET       56
+#define CTX_SPSR_OFFSET         60
+#define CTX_SP_USR_OFFSET       64
+#define CTX_LR_USR_OFFSET       68
+#define PROC_PGD_PA_OFFSET      88
+
+_Static_assert(offsetof(proc_context_t, sp_svc) == CTX_SP_SVC_OFFSET,
+               "ctx.sp_svc offset drifted");
+_Static_assert(offsetof(proc_context_t, sp_usr) == CTX_SP_USR_OFFSET,
+               "ctx.sp_usr offset drifted");
+_Static_assert(offsetof(proc_context_t, lr_usr) == CTX_LR_USR_OFFSET,
+               "ctx.lr_usr offset drifted");
+_Static_assert(offsetof(process_t, pgd_pa)    == PROC_PGD_PA_OFFSET,
+               "process.pgd_pa offset drifted");
 
 #endif /* KERNEL_PROC_H */

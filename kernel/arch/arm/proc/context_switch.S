@@ -1,66 +1,82 @@
 /* ===========================================================
- * kernel/arch/arm/proc/context_switch.S — first user-mode entry
+ * kernel/arch/arm/proc/context_switch.S — bidirectional switch
  *
- * void context_switch_to_user(uint32_t pgd_pa,
- *                             uint32_t sp_svc,
- *                             uint32_t spsr,
- *                             uint32_t sp_usr) __attribute__((noreturn));
+ * void context_switch(process_t *prev, process_t *next);
  *
- * One-way trip from kernel into a process's user mode. Called
- * exactly once from kmain to bootstrap the first process; never
- * returns. Bidirectional save/restore (real context switch) lives
- * in a future iteration that wires into the IRQ exit path.
+ * Saves prev's kernel state (callee-saved GPRs + lr pushed on
+ * prev's SVC stack, plus banked SP_usr/LR_usr into prev->ctx)
+ * then loads next's equivalents. Swaps TTBR0 and flushes TLB
+ * between save and load.
  *
- * Caller passes the process's pgd_pa, the kernel SP that points
- * at the pre-built initial frame (process_build_initial_frame),
- * the target USR-mode CPSR (0x10), and the banked USR-mode SP.
+ * prev == NULL is a legal "no-save, load-only" form used by the
+ * very first call from kmain to bootstrap processes[0]. In that
+ * case the epilogue still pops next's 9-word kernel-resume frame
+ * and bx lr's to ret_from_first_entry (pre-baked into the
+ * initial stack), which drains the 16-word IRQ-exit frame and
+ * atomically enters USR mode.
  *
- * Sequence:
- *   1. Mask IRQ + FIQ for the transition.
- *   2. TTBR0 = pgd_pa | walk-attrs   — boot_pgd lacks user VA
- *      0x40000000; only the per-process PGD has it.
- *   3. TLBIALL + DSB + ISB — drop stale boot_pgd translations.
- *   4. Set banked SP_usr via SYS-mode shortcut (shares USR regs).
- *   5. SVC stack = sp_svc — the 14-word frame to consume.
- *   6. spsr_cxsf = target USR CPSR.
- *   7. ldmfd sp!, {r0-r12, pc}^ — atomic register restore + mode
- *      switch (^ on pc-load copies SPSR -> CPSR).
+ * Caller is expected to be in SVC mode with CPSR.I already
+ * matching the desired interrupt state; this routine does not
+ * change the interrupt mask.
+ *
+ * Struct offsets are duplicated here and checked by _Static_assert
+ * in kernel/include/proc.h — drift triggers a compile error.
  * =========================================================== */
+
+    .equ CTX_SP_SVC_OFFSET,     52
+    .equ CTX_SP_USR_OFFSET,     64
+    .equ CTX_LR_USR_OFFSET,     68
+    .equ PROC_PGD_PA_OFFSET,    88
 
     .section .text.ctxsw, "ax"
     .align  4
-    .global context_switch_to_user
+    .global context_switch
 
-context_switch_to_user:
-    /* r0 = pgd_pa, r1 = sp_svc, r2 = spsr, r3 = sp_usr */
+context_switch:
+    /* r0 = prev (may be NULL), r1 = next */
 
-    /* 1. Mask interrupts during the transition. */
-    cpsid   if
+    /* ----- save side ------------------------------------- */
+    cmp     r0, #0
+    beq     .Lload_next
 
-    /* 2. Swap TTBR0 with walk attributes (S=1, RGN=01, IRGN=01). */
-    orr     r0, r0, #0x4A
-    mcr     p15, 0, r0, c2, c0, 0       @ TTBR0 = pgd_pa | attrs
+    /* Push callee-saved GPRs + return address onto prev's SVC
+     * stack. 9 words total; sp is now at the top of that frame. */
+    push    {r4-r11, lr}
+    str     sp, [r0, #CTX_SP_SVC_OFFSET]
 
-    /* 3. Invalidate entire TLB then sync. */
-    mov     r0, #0
-    mcr     p15, 0, r0, c8, c7, 0       @ TLBIALL
+    /* Save prev's banked USR-mode SP and LR. They are only
+     * accessible from a mode that shares the USR register bank
+     * (SYS mode, CPSR.M = 0x1F). */
+    cps     #0x1F
+    str     sp, [r0, #CTX_SP_USR_OFFSET]
+    str     lr, [r0, #CTX_LR_USR_OFFSET]
+    cps     #0x13
+
+.Lload_next:
+    /* ----- swap address space ---------------------------- */
+    ldr     r2, [r1, #PROC_PGD_PA_OFFSET]
+    orr     r2, r2, #0x4A                   @ TTBR0 walk attrs
+    mcr     p15, 0, r2, c2, c0, 0
+    mov     r2, #0
+    mcr     p15, 0, r2, c8, c7, 0           @ TLBIALL
     dsb
     isb
 
-    /* 4. Set banked SP_usr by hopping into SYS mode (shares USR
-     *    register file) and back to SVC. */
-    cps     #0x1F                       @ SYS mode
-    mov     sp, r3                      @ SP_usr = sp_usr
-    cps     #0x13                       @ back to SVC
+    /* ----- load next ------------------------------------- */
+    /* Restore banked USR regs before leaving SYS mode. */
+    cps     #0x1F
+    ldr     sp, [r1, #CTX_SP_USR_OFFSET]
+    ldr     lr, [r1, #CTX_LR_USR_OFFSET]
+    cps     #0x13
 
-    /* 5. Point SVC SP at the pre-built initial frame's r0 slot. */
-    mov     sp, r1
+    /* Swap to next's kernel stack. From here on sp references
+     * whatever context_switch left on next's SVC stack last
+     * time it paused — either a real 9-word resume frame, or
+     * the pre-built one from process_build_initial_frame. */
+    ldr     sp, [r1, #CTX_SP_SVC_OFFSET]
 
-    /* 6. Stage target CPSR for the atomic mode switch below. */
-    msr     spsr_cxsf, r2
-
-    /* 7. Atomic restore: pop r0-r12 + pc, AND copy SPSR -> CPSR.
-     *    The '^' modifier on ldmfd-with-pc applies the SPSR copy
-     *    as part of the same instruction, switching to USR mode
-     *    with IRQ unmasked exactly when PC moves to user_entry. */
-    ldmfd   sp!, {r0-r12, pc}^
+    /* Pop r4-r11 + lr (9 words). For first-time entries, lr
+     * ends up pointing at ret_from_first_entry, which finishes
+     * the job by draining the 16-word IRQ-exit frame. */
+    pop     {r4-r11, lr}
+    bx      lr

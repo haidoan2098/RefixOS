@@ -11,6 +11,7 @@
 
 #include "exception.h"
 #include "irq.h"
+#include "scheduler.h"
 #include "uart/uart.h"
 
 /* ARM mode names indexed by CPSR[4:0] */
@@ -152,6 +153,10 @@ void handle_svc(exception_context_t *ctx)
 void handle_irq(void)
 {
     irq_dispatch();
+    /* Scheduler tail — if timer_irq flipped need_reschedule,
+     * this swaps SP onto the next process's kernel stack before
+     * exception_entry_irq's ldmfd/rfefd drain it. */
+    schedule();
 }
 
 /* ===========================================================
