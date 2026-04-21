@@ -40,9 +40,23 @@ static uint32_t proc_pgd[NUM_PROCESSES][PGD_ENTRIES]
 static uint8_t proc_kstack[NUM_PROCESSES][KSTACK_SIZE]
     __attribute__((aligned(8)));
 
-/* User stub bounds — provided by user_stub.S via linker */
-extern uint8_t user_stub_start[];
-extern uint8_t user_stub_end[];
+/* User-program images (embedded via .incbin in
+ * kernel/arch/arm/proc/user_binaries.S). One entry per pid. */
+extern uint8_t _counter_img_start[], _counter_img_end[];
+extern uint8_t _runaway_img_start[], _runaway_img_end[];
+extern uint8_t _shell_img_start[],   _shell_img_end[];
+
+typedef struct {
+    const char    *name;
+    const uint8_t *start;
+    const uint8_t *end;
+} user_image_t;
+
+static const user_image_t user_images[NUM_PROCESSES] = {
+    { "counter", _counter_img_start, _counter_img_end },
+    { "runaway", _runaway_img_start, _runaway_img_end },
+    { "shell",   _shell_img_start,   _shell_img_end   },
+};
 
 /* Trampoline landed on by context_switch's bx lr for first-time
  * entries. Defined in kernel/arch/arm/exception/exception_entry.S.
@@ -131,30 +145,21 @@ static void process_build_initial_frame(process_t *p)
 }
 
 /* -----------------------------------------------------------
- * Human-readable names — debug only, static lifetime.
- * ----------------------------------------------------------- */
-static const char *const proc_names[NUM_PROCESSES] = {
-    "counter",
-    "runaway",
-    "shell",
-};
-
-/* -----------------------------------------------------------
  * process_init_all — build all NUM_PROCESSES PCBs
  * ----------------------------------------------------------- */
 void process_init_all(void)
 {
-    uint32_t stub_size = (uint32_t)(user_stub_end - user_stub_start);
-
     for (uint32_t i = 0; i < NUM_PROCESSES; i++) {
-        process_t *p = &processes[i];
+        process_t          *p   = &processes[i];
+        const user_image_t *img = &user_images[i];
+        uint32_t            img_size = (uint32_t)(img->end - img->start);
 
         /* Clear PCB — static storage is already zero, but be explicit */
         kmemset(p, 0, sizeof(*p));
 
         p->pid         = i;
         p->state       = TASK_READY;
-        p->name        = proc_names[i];
+        p->name        = img->name;
 
         p->pgd         = proc_pgd[i];
         /* pgd is the VA pointer (linker symbol); pgd_pa is what
@@ -170,14 +175,12 @@ void process_init_all(void)
         p->user_stack_top = USER_STACK_TOP;
         p->user_phys_base = USER_PHYS_BASE + i * USER_PHYS_STRIDE;
 
-        /* Drop a fresh copy of the user stub into this process's
-         * physical slot. Kernel runs at high VA, so we reach the
-         * user PA through the high-VA alias (PA + PHYS_OFFSET)
-         * rather than via the identity map — the identity range
-         * will be torn down once all boot-time PA touches are gone. */
+        /* Copy this process's user image into its PA slot. Reach
+         * the PA through the high-VA alias (PA + PHYS_OFFSET) so
+         * we never touch identity mapping. */
         void *user_va = (void *)(p->user_phys_base + PHYS_OFFSET);
         kmemset(user_va, 0, USER_REGION_SIZE);
-        kmemcpy(user_va, user_stub_start, stub_size);
+        kmemcpy(user_va, img->start, img_size);
 
         /* Build the per-process L1 table: kernel mirror + user
          * section at 0x40000000 → p->user_phys_base */
@@ -187,9 +190,10 @@ void process_init_all(void)
         process_build_initial_frame(p);
 
         uart_printf("[PROC] pid=%u name=%s pgd=0x%08x "
-                    "kstack=0x%08x user_pa=0x%08x\n",
+                    "kstack=0x%08x user_pa=0x%08x img=%u bytes\n",
                     p->pid, p->name, (uint32_t)p->pgd,
-                    (uint32_t)p->kstack_base, p->user_phys_base);
+                    (uint32_t)p->kstack_base, p->user_phys_base,
+                    img_size);
     }
 
     current = &processes[0];

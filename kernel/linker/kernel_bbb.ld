@@ -51,14 +51,15 @@ SECTIONS
     } > VIRT AT> PHYS
 
     /* -------------------------------------------------------
-     * .user_stub — inline user-mode code template (phase 1 of
-     * process management). process_init_all() memcpy's these
-     * bytes into each process's 1 MB user PA slot.
+     * .user_binaries — embedded user-program images. See
+     * kernel/arch/arm/proc/user_binaries.S for the .incbin
+     * entries and process_init_all() for how they are loaded
+     * into per-process user PA slots.
      * ------------------------------------------------------- */
-    .user_stub :
+    .user_binaries :
     {
         . = ALIGN(4);
-        KEEP(*(.user_stub))
+        KEEP(*(.user_binaries))
         . = ALIGN(4);
     } > VIRT AT> PHYS
 
