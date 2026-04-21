@@ -12,6 +12,7 @@
 #include "exception.h"
 #include "irq.h"
 #include "scheduler.h"
+#include "syscall.h"
 #include "uart/uart.h"
 
 /* ARM mode names indexed by CPSR[4:0] */
@@ -129,21 +130,19 @@ void handle_undefined(exception_context_t *ctx)
 }
 
 /* ===========================================================
- * SVC handler — prints syscall number and returns to caller
+ * SVC handler — Linux-style syscall dispatch
  *
- * The SVC number is encoded in the SVC instruction itself:
- *   ARM mode:   svc #N → bottom 24 bits of the instruction
- *   Thumb mode: svc #N → bottom 8 bits
- * We read it from memory at the SVC instruction address.
+ * Convention: r7 holds the syscall number, r0..r3 the arguments,
+ * r0 receives the return value. We ignore the svc #N immediate
+ * itself (always 0 in RingNova user code).
+ *
+ * After dispatch we call schedule() so that sys_yield / sys_exit
+ * can swap context before returning to user mode.
  * =========================================================== */
 void handle_svc(exception_context_t *ctx)
 {
-    uint32_t svc_addr = ctx->lr - 4;   /* SVC instruction is before LR */
-    uint32_t svc_instr = *((volatile uint32_t *)svc_addr);
-    uint32_t svc_num = svc_instr & 0x00FFFFFFU;  /* ARM: bits [23:0] */
-
-    uart_printf("[SVC]   syscall #%u from PC=0x%08x\n",
-                svc_num, svc_addr);
+    syscall_dispatch(ctx);
+    schedule();
 }
 
 /* ===========================================================

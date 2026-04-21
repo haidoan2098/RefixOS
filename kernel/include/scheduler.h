@@ -10,7 +10,8 @@
  * IRQ stack frame is already settled when we swap processes.
  * ============================================================ */
 
-void scheduler_tick(void);  /* timer IRQ callback                */
-void schedule(void);        /* consults flag, switches if needed */
+void scheduler_tick(void);              /* timer IRQ callback               */
+void schedule(void);                    /* consults flag, switches if needed */
+void scheduler_request_resched(void);   /* syscall paths raise flag via this */
 
 #endif /* KERNEL_SCHED_H */

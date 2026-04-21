@@ -29,6 +29,13 @@ void scheduler_tick(void)
     need_reschedule = 1;
 }
 
+/* Used by syscall handlers (sys_yield, sys_exit) to ask for an
+ * immediate switch when schedule() runs at handle_svc's tail. */
+void scheduler_request_resched(void)
+{
+    need_reschedule = 1;
+}
+
 void schedule(void)
 {
     if (!need_reschedule || !current)
