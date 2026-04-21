@@ -377,9 +377,17 @@ void kmain(void)
     *((volatile uint32_t *)0) = 0xDEADBEEF;
 #endif
 
-    uart_printf("[BOOT] boot complete — entering idle loop\n");
+    uart_printf("[BOOT] boot complete — entering user mode pid=%u "
+                "(USR @ 0x%08x)\n",
+                processes[0].pid, processes[0].user_entry);
 
-    /* Halt — scheduler not implemented yet */
-    for (;;)
-        __asm__ volatile("wfi");
+    /* One-way trip into the first process's user mode. From here
+     * on the kernel only re-enters via exceptions (timer IRQ, SVC,
+     * faults). Phase 2 will add the bidirectional context_switch
+     * + scheduler that lets pid 1 and 2 get their slices. */
+    context_switch_to_user(processes[0].pgd_pa,
+                           processes[0].ctx.sp_svc,
+                           processes[0].ctx.spsr,
+                           processes[0].ctx.sp_usr);
+    /* noreturn — code below is unreachable */
 }

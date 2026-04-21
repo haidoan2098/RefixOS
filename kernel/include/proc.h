@@ -80,4 +80,18 @@ void process_init_all(void);
 /* Pretty-print one PCB over UART. Debug only. */
 void process_dump(const process_t *p);
 
+/* First user-mode entry — implemented in
+ * kernel/arch/arm/proc/context_switch.S.
+ *
+ * One-way trip: bootstraps the first process by swapping TTBR0,
+ * loading the banked USR-mode SP, and atomically restoring the
+ * pre-built initial frame via ldmfd^. Never returns.
+ *
+ * Caller passes primitive fields (not the PCB pointer) so the
+ * assembly avoids hard-coding struct offsets. */
+void context_switch_to_user(uint32_t pgd_pa,
+                            uint32_t sp_svc,
+                            uint32_t spsr,
+                            uint32_t sp_usr) __attribute__((noreturn));
+
 #endif /* KERNEL_PROC_H */
