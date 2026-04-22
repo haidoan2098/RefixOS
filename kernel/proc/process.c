@@ -1,26 +1,23 @@
 /* ============================================================
  * kernel/proc/process.c — PCB table + static initialisation
  *
- * Phase 1: build 3 static process descriptors. No scheduler,
- * no context switch. After process_init_all() runs, each PCB
- * contains a valid per-process L1 table, a private 1 MB user
- * PA slot (loaded with the inline user_stub), and a pre-built
- * initial kernel stack frame ready for the first context switch
- * to consume — the next chapter plugs the switch in.
+ * Builds 3 static process descriptors. After process_init_all(),
+ * each PCB owns a per-process L1 table, a private 1 MB user PA
+ * slot loaded with the process's binary, and a pre-built initial
+ * kernel stack frame ready for context_switch to consume.
  *
- * Memory layout (see docs/memory-architecture.md §1):
+ * Memory layout:
  *   proc 0 user PA = RAM_BASE + 0x200000
  *   proc 1 user PA = RAM_BASE + 0x300000
  *   proc 2 user PA = RAM_BASE + 0x400000
- *
- * Dependencies: board.h, proc.h, mmu.h, uart/uart.h
  * ============================================================ */
 
 #include <stdint.h>
 #include "board.h"
+#include "drivers/uart.h"
 #include "mmu.h"
+#include "platform.h"
 #include "proc.h"
-#include "uart/uart.h"
 
 /* -----------------------------------------------------------
  * Static backing storage

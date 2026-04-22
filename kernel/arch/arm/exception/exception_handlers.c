@@ -9,12 +9,13 @@
  * Dependencies: uart driver, exception.h
  * =========================================================== */
 
+#include "drivers/intc.h"
+#include "drivers/uart.h"
 #include "exception.h"
-#include "irq.h"
+#include "platform.h"
 #include "proc.h"
 #include "scheduler.h"
 #include "syscall.h"
-#include "uart/uart.h"
 
 /* ARM mode names indexed by CPSR[4:0] */
 static const char *mode_name(uint32_t cpsr)

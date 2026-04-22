@@ -23,6 +23,7 @@
 
 #include "mmu.h"
 #include "board.h"
+#include "platform.h"
 
 /* Boot L1 translation table — 16 KB, 16 KB aligned.
  * Placed in .bss.pgd (inside .bss) so start.S zeroes it → all
@@ -41,8 +42,8 @@ static inline void map_section(uint32_t *pgd, uint32_t va,
     pgd[va >> 20] = (pa & 0xFFF00000U) | attrs;
 }
 
-static void map_range(uint32_t *pgd, uint32_t va, uint32_t pa,
-                      uint32_t size_bytes, uint32_t attrs)
+void pgtable_map_range(uint32_t *pgd, uint32_t va, uint32_t pa,
+                       uint32_t size_bytes, uint32_t attrs)
 {
     uint32_t count = size_bytes >> 20;   /* number of 1 MB sections */
     uint32_t i;
@@ -59,29 +60,20 @@ void mmu_build_boot_pgd(uint32_t *pgd)
 
     /* 1. Identity map kernel RAM — required only during the narrow
      *    window between MMU enable and the VA trampoline in start.S.
-     *    After kmain starts executing at high VA the identity range
-     *    can be dropped (mmu_drop_identity(), to be added). */
-    map_range(pgd, RAM_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
+     *    Dropped by mmu_drop_identity() once kmain reaches high VA. */
+    pgtable_map_range(pgd, RAM_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
 
     /* 2. Kernel high VA alias at 0xC0000000.
      *    This is where kmain + all post-MMU code runs; linker emits
      *    every kernel symbol in this range. */
-    map_range(pgd, VA_KERNEL_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
+    pgtable_map_range(pgd, VA_KERNEL_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
 
-    /* 3. Peripheral regions — identity mapped, strongly-ordered, XN. */
-#ifdef PLATFORM_QEMU
-    /* realview-pb-a8:
-     *   UART0 @ 0x10009000, SP804 @ 0x10011000 — 2 sections
-     *   GIC   @ 0x1E000000 (CPU iface + distributor)         — 1 section */
-    map_range(pgd, 0x10000000U, 0x10000000U, 2U << 20, PDE_DEVICE);
-    map_range(pgd, 0x1E000000U, 0x1E000000U, 1U << 20, PDE_DEVICE);
-#elif defined(PLATFORM_BBB)
-    /* AM335x:
-     *   L4_WKUP  @ 0x44E00000 (UART0, WDT, CM_PER)       — 1 MB
-     *   L4_PER   @ 0x48000000 (INTC, DMTIMER, GPIO, ...) — 16 MB */
-    map_range(pgd, 0x44E00000U, 0x44E00000U,  1U << 20, PDE_DEVICE);
-    map_range(pgd, 0x48000000U, 0x48000000U, 16U << 20, PDE_DEVICE);
-#endif
+    /* 3. Peripheral regions — identity mapped, strongly-ordered, XN.
+     *    Deferred to the platform: each kernel/platform/<p>/periph_map.c
+     *    calls pgtable_map_range with literal addresses. This keeps
+     *    the function safe to invoke at PA (every constant is either
+     *    an immediate or a PC-relative literal-pool load). */
+    platform_map_peripherals(pgd);
 
     /* Entry 0 (VA 0x00000000 .. 0x000FFFFF) is left as FAULT:
      * null-pointer dereference raises Data Abort. */

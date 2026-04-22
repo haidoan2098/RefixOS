@@ -4,16 +4,11 @@
 /* ============================================================
  * proc.h — Process Control Block and process management API
  *
- * Phase 1 of process management: 3 static processes, each with
+ * 3 static processes, each with:
  *   - its own 16 KB L1 page table (physical isolation real)
  *   - its own 8 KB kernel stack with a pre-built initial frame
  *   - its own 1 MB user physical slot
  *   - all sharing the user VA window 0x40000000 (different PA)
- *
- * No scheduler and no context switch yet — the PCBs are dressed
- * and ready for the next chapter to drop in.
- *
- * Dependencies: board.h (layout constants), mmu.h (page tables)
  * ============================================================ */
 
 #include <stdint.h>
@@ -27,16 +22,10 @@ typedef enum {
     TASK_DEAD
 } task_state_t;
 
-/* Saved CPU context. Layout MUST match what the future
- * context_switch.S pops:
- *
- *   msr    spsr_cxsf, ctx.spsr
- *   ldr    sp, =ctx.sp_svc
- *   ldmfd  sp!, {r0-r12, pc}^
- *
- * Field order here is documentary; the actual initial frame on
- * the kernel stack (built by process_build_initial_frame) is
- * what the restore sequence consumes. */
+/* Saved CPU context. The actual initial frame on the kernel
+ * stack (built by process_build_initial_frame) is what
+ * context_switch.S consumes; this struct just parks the banked
+ * registers and pointer state that cannot live on the stack. */
 typedef struct {
     uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
     uint32_t r8, r9, r10, r11, r12;
@@ -55,7 +44,7 @@ typedef struct process {
     const char     *name;
 
     uint32_t       *pgd;            /* VA of this process's L1 table   */
-    uint32_t        pgd_pa;         /* PA for future TTBR0 swap        */
+    uint32_t        pgd_pa;         /* PA written into TTBR0 on switch */
 
     void           *kstack_base;    /* low addr of the 8 KB region     */
     uint32_t        kstack_size;

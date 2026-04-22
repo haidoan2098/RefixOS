@@ -17,7 +17,8 @@
 
 #include "mmu.h"
 #include "board.h"
-#include "uart/uart.h"
+#include "drivers/uart.h"
+#include "platform.h"
 
 extern uint32_t boot_pgd[];
 
@@ -86,8 +87,8 @@ void mmu_print_status(void)
 /*
  * mmu_drop_identity() — tear down the RAM_BASE..+RAM_SIZE identity
  * PA→PA range. Called from kmain after every boot-time PA touch
- * (T3, T4, user-stub copy) has happened, so any future PA
- * dereference from kernel code is a bug that now faults.
+ * has completed, so any stray PA dereference from kernel code
+ * after this point is a bug that faults immediately.
  *
  * High-VA kernel alias + peripherals + NULL guard are untouched.
  */

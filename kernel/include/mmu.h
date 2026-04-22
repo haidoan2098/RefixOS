@@ -85,4 +85,10 @@ uint32_t mmu_read_ttbr0(void);
  * Caller owns the 16 KB-aligned pgd buffer. */
 void     pgtable_build_for_proc(uint32_t *pgd, uint32_t user_pa);
 
+/* Install one or more 1 MB sections into pgd. Safe to call while
+ * the MMU is still off — the function body contains no VA pointer
+ * dereference, only immediate arithmetic on the caller's pgd. */
+void     pgtable_map_range(uint32_t *pgd, uint32_t va, uint32_t pa,
+                           uint32_t size_bytes, uint32_t attrs);
+
 #endif /* KERNEL_MMU_H */

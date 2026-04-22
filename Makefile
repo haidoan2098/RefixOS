@@ -10,7 +10,6 @@
 # All output goes to build/
 
 PLATFORM ?= qemu
-PLATFORM_UPPER := $(shell echo $(PLATFORM) | tr a-z A-Z)
 
 # Toolchain
 CROSS   ?= arm-none-eabi-
@@ -20,20 +19,23 @@ LD      := $(CROSS)ld
 OBJCOPY := $(CROSS)objcopy
 
 # Build directories
-BUILD_DIR := build/$(PLATFORM)
-OBJ_DIR   := build/obj/$(PLATFORM)
-USER_DIR  := build/user
+BUILD_DIR    := build/$(PLATFORM)
+OBJ_DIR      := build/obj/$(PLATFORM)
+USER_DIR     := build/user
+PLATFORM_DIR := kernel/platform/$(PLATFORM)
 
 # Linker scripts
 LDSCRIPT      := kernel/linker/kernel_$(PLATFORM).ld
 USER_LDSCRIPT := user/linker/user.ld
 
 # ----- Kernel flags -----
+# -I $(PLATFORM_DIR) picks up the active board.h; no -DPLATFORM_*
+# macros are needed because platform selection is done at the file
+# level (kernel/platform/<p>/ is linked in, the other folder is not).
 CFLAGS := -nostdlib -ffreestanding -nostartfiles \
           -mcpu=cortex-a8 -marm \
-          -DPLATFORM_$(PLATFORM_UPPER) \
           -I kernel/include \
-          -I kernel/drivers \
+          -I $(PLATFORM_DIR) \
           -Wall -Wextra -g
 
 # ----- User flags -----
@@ -47,16 +49,25 @@ UCFLAGS := -nostdlib -ffreestanding -nostartfiles \
 # ------------------------------------------------------------
 # Kernel sources
 # ------------------------------------------------------------
+# Each platform lists its chip drivers in kernel/platform/<p>/platform.mk.
+# That file defines PLATFORM_DRIVERS, which feeds into C_SRCS below.
+-include $(PLATFORM_DIR)/platform.mk
+
+DRIVER_CORES := kernel/drivers/uart/uart_core.c \
+                kernel/drivers/timer/timer_core.c \
+                kernel/drivers/intc/intc_core.c
+
 C_SRCS := kernel/main.c \
-          kernel/drivers/uart/uart.c \
-          kernel/drivers/intc/intc.c \
-          kernel/drivers/timer/timer.c \
+          kernel/proc/process.c \
+          kernel/sched/scheduler.c \
+          kernel/syscall/syscall.c \
           kernel/arch/arm/exception/exception_handlers.c \
           kernel/arch/arm/mm/mmu.c \
           kernel/arch/arm/mm/pgtable.c \
-          kernel/proc/process.c \
-          kernel/sched/scheduler.c \
-          kernel/syscall/syscall.c
+          $(PLATFORM_DIR)/board.c \
+          $(PLATFORM_DIR)/periph_map.c \
+          $(DRIVER_CORES) \
+          $(PLATFORM_DRIVERS)
 
 S_SRCS := kernel/arch/arm/boot/start.S \
           kernel/arch/arm/exception/vectors.S \
@@ -82,11 +93,26 @@ USER_CRT0_OBJ  := $(USER_DIR)/crt0.o
 TARGET_ELF := $(BUILD_DIR)/kernel.elf
 TARGET_BIN := $(BUILD_DIR)/kernel.bin
 
+# ------------------------------------------------------------
+# BBB-only: SPL bootloader (submodule) → MLO
+# ROM code on AM335x reads MLO from FAT, loads into SRAM, runs it.
+# MLO then inits DDR + MMC and loads kernel.bin from raw sectors.
+# ------------------------------------------------------------
+BOOTLOADER_DIR := bootloader
+BOOTLOADER_MLO := $(BOOTLOADER_DIR)/build/MLO
+MLO_DST        := $(BUILD_DIR)/MLO
+
+ifeq ($(PLATFORM),bbb)
+  ALL_TARGETS := $(TARGET_ELF) $(TARGET_BIN) $(MLO_DST)
+else
+  ALL_TARGETS := $(TARGET_ELF) $(TARGET_BIN)
+endif
+
 .DEFAULT_GOAL := all
 
-.PHONY: all clean clean-all qemu user
+.PHONY: all clean clean-all qemu user bootloader
 
-all: $(TARGET_ELF) $(TARGET_BIN)
+all: $(ALL_TARGETS)
 	@echo "[OK] $(TARGET_ELF)"
 
 user: $(USER_BINS)
@@ -146,11 +172,26 @@ endef
 $(foreach a,$(USER_APPS),$(eval $(call USER_APP_RULES,$(a))))
 
 # ------------------------------------------------------------
+# Bootloader (BBB SPL) — always rebuild, submodule decides if its
+# own artifacts are up to date.
+# ------------------------------------------------------------
+bootloader $(BOOTLOADER_MLO):
+	$(MAKE) -C $(BOOTLOADER_DIR)
+
+$(MLO_DST): $(BOOTLOADER_MLO)
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+# ------------------------------------------------------------
 clean:
 	rm -rf build/$(PLATFORM) build/obj/$(PLATFORM) build/user
+ifeq ($(PLATFORM),bbb)
+	$(MAKE) -C $(BOOTLOADER_DIR) clean
+endif
 
 clean-all:
 	rm -rf build/
+	-$(MAKE) -C $(BOOTLOADER_DIR) clean
 
 qemu: all
 	@bash scripts/qemu/run.sh
