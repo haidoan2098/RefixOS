@@ -20,10 +20,10 @@ của riêng mình.
 
 ## Trạng thái
 
-Implemented end-to-end trên QEMU. Boot → 3 user process → shell tương tác
-qua UART. ~5000 dòng C + assembly + linker scripts. BBB port (NS16550
-UART RX IRQ) chưa wire — kernel + user binaries vẫn build clean cho cả hai
-platform.
+Implemented end-to-end trên cả QEMU và BeagleBone Black. Boot → 3 user
+process → shell tương tác qua UART. ~5000 dòng C + assembly + linker
+scripts. Chọn platform tại build time (`make PLATFORM=qemu|bbb`); kernel
+core chung, chỉ chip drivers + board wire-up khác.
 
 ---
 
@@ -77,8 +77,9 @@ platform.
 
 CPU vào kernel ở PA. start.S compute PHYS_OFFSET, gọi `mmu_init` xây boot
 page table, bật MMU, rồi `ldr pc, =_start_va` trampoline PC sang VA cao
-`0xC0100000`. Từ đó kernel chạy hoàn toàn ở high VA. Identity RAM bị drop
-sau boot tests để stray PA dereference fault ngay.
+(`KERNEL_VIRT_BASE = 0xC0000000+`). Từ đó kernel chạy hoàn toàn ở high VA.
+Identity RAM bị drop sau khi process_init_all xong để stray PA dereference
+fault ngay.
 
 ### Memory & MMU
 

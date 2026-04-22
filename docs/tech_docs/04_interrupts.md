@@ -66,19 +66,22 @@ flowchart LR
     MP --> F[exception_init]
     F --> G["★ irq_init<br/>(INTC reset,<br/>mask all)"]
     G --> H["★ timer_init<br/>(10 ms period)"]
-    H --> I["★ irq_register<br/>+ irq_enable<br/>+ irq_cpu_enable"]
-    I --> J["boot self-tests<br/>T1–T9"]
-    J --> DI[mmu_drop_identity]
-    DI --> K[idle loop<br/>timer ticks]
+    H --> I["★ irq_register<br/>+ irq_enable<br/>(per-line INTC unmask)"]
+    I --> PI[process_init_all]
+    PI --> DI[mmu_drop_identity]
+    DI --> PFR["process_first_run<br/>(rfefd → USR,<br/>CPSR.I=0 atomic)"]
 
     style G fill:#ffe699,stroke:#e8a700,color:#000
     style H fill:#ffe699,stroke:#e8a700,color:#000
     style I fill:#ffe699,stroke:#e8a700,color:#000
 ```
 
-Điểm mới của chapter này: sau khi MMU bật + VBAR cài, kernel lần đầu bật IRQ toàn cục
-(`CPSR.I=0`). Từ `irq_cpu_enable()` trở đi, timer fire mỗi 10 ms → `handle_irq` chạy →
-`tick_count++` → handler quay lại code bị ngắt. Kernel không còn "mù" nữa.
+Điểm mới của chapter này: INTC chip được cấu hình (mask all → per-line enable qua
+`irq_register + irq_enable`), timer driver được start, vector table cài VBAR. CPU-level
+`CPSR.I` vẫn mask trong suốt kmain — tránh timer IRQ preempt kmain và corrupt PCB đang
+build. Khi `process_first_run` swap sang user mode đầu tiên qua `rfefd`, CPSR.I=0 được
+restore atomic; từ đó mỗi exception entry tự động mask I=1 và rfefd restore lại — kernel
+không bao giờ chạy với IRQ enabled trên stack có thể bị yank.
 
 **Lưu ý về thứ tự:** `mmu_init` chạy từ `start.S` (trước `kmain`), không phải từ `kmain` —
 vì `uart_printf` dùng VA string literal, không hoạt động pre-MMU. Log MMU được `kmain`
@@ -399,27 +402,24 @@ tiếp theo đều bị block.
 
 | File | Nội dung |
 |------|----------|
-| [kernel/include/irq.h](../../kernel/include/irq.h) | API dispatch + `IRQ_TIMER` per-platform |
-| [kernel/drivers/intc/intc.h](../../kernel/drivers/intc/intc.h) | Interface 5 hàm INTC |
-| [kernel/drivers/intc/intc.c](../../kernel/drivers/intc/intc.c) | GIC v1 (QEMU) + AM335x INTC + dispatcher |
-| [kernel/drivers/timer/timer.h](../../kernel/drivers/timer/timer.h) | API timer |
-| [kernel/drivers/timer/timer.c](../../kernel/drivers/timer/timer.c) | SP804 (QEMU) + DMTIMER2 (BBB) |
-| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | `exception_entry_irq` rewrite (srsdb/rfefd) |
+| [kernel/include/drivers/intc.h](../../kernel/include/drivers/intc.h) | `struct intc_ops` contract + `irq_*` dispatch API |
+| [kernel/include/drivers/timer.h](../../kernel/include/drivers/timer.h) | `struct timer_ops` contract + `timer_*` API |
+| [kernel/drivers/intc/intc_core.c](../../kernel/drivers/intc/intc_core.c) | Generic IRQ table + dispatch + `intc_*` thin wrappers |
+| [kernel/drivers/intc/gicv1.c](../../kernel/drivers/intc/gicv1.c) | `struct intc_ops gicv1_ops` — QEMU realview-pb-a8 |
+| [kernel/drivers/intc/am335x_intc.c](../../kernel/drivers/intc/am335x_intc.c) | `struct intc_ops am335x_intc_ops` — BBB |
+| [kernel/drivers/timer/timer_core.c](../../kernel/drivers/timer/timer_core.c) | tick_count + user_handler + dispatch |
+| [kernel/drivers/timer/sp804.c](../../kernel/drivers/timer/sp804.c) | `struct timer_ops sp804_ops` — QEMU |
+| [kernel/drivers/timer/dmtimer.c](../../kernel/drivers/timer/dmtimer.c) | `struct timer_ops dmtimer_ops` — BBB |
+| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | `exception_entry_irq` (srsdb/rfefd → SVC stack) |
 | [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` → `irq_dispatch()` |
-| [kernel/include/board.h](../../kernel/include/board.h) | `GIC_*_BASE`, `CM_PER_BASE`, `TIMER_CLK_HZ` |
-| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Map thêm 1 section cho GIC @ `0x1E000000` |
+| [kernel/platform/qemu/board.c](../../kernel/platform/qemu/board.c) / [bbb/board.c](../../kernel/platform/bbb/board.c) | Khai báo `intc_device` / `timer_device` và bind ops + địa chỉ |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | `GIC_*_BASE` / `INTC_BASE`, `TIMER*_BASE`, `IRQ_TIMER`, `TIMER_CLK_HZ` |
 
 ### Điểm chính
 
-**Backend chọn tại compile time** — cả hai file driver dùng cùng pattern `#ifdef` như UART:
+**Backend chọn tại link time** — `kernel/platform/<board>/platform.mk` liệt kê driver cụ thể. Cho QEMU: `gicv1.c + sp804.c`; cho BBB: `am335x_intc.c + dmtimer.c`. Makefile chỉ compile driver board đang dùng, zero `#ifdef` còn sót trong kernel.
 
-```c
-#ifdef PLATFORM_QEMU
-  /* GIC v1 init: disable dist → mask SPIs → set priority/target → re-enable */
-#elif defined(PLATFORM_BBB)
-  /* AM335x: soft reset → mask 4 banks → threshold 0xFF → NEWIRQAGR */
-#endif
-```
+Kernel core gọi `irq_register(IRQ_TIMER, timer_irq)` xuyên qua subsystem layer — `intc_core` dispatch xuống `active_intc->ops->enable_line()`. Driver PL011 không biết mình đang chạy trên QEMU hay RPi; biết base address là đủ, lấy từ `dev->base` do `board.c` set.
 
 **GIC init trên QEMU** — điểm dễ sai là thứ tự bật distributor vs CPU interface:
 
@@ -455,11 +455,14 @@ irq_init();                              /* INTC reset, mask all       */
 timer_init(10000);                       /* 10 ms period               */
 irq_register(IRQ_TIMER, timer_irq);      /* đăng ký callback           */
 irq_enable(IRQ_TIMER);                   /* unmask line trong INTC     */
-irq_cpu_enable();                        /* cpsie i — clear CPSR.I     */
+irq_register(IRQ_UART0, uart_rx_irq);
+irq_enable(IRQ_UART0);
 ```
 
-Thứ tự không đảo được: enable line trong INTC **trước** khi unmask CPU. Ngược lại → CPU
-sẵn sàng nhận IRQ nhưng INTC chưa route → miss tick đầu tiên.
+CPU-level unmask không gọi ở đây — `rfefd` trong `ret_from_first_entry` restore
+USR CPSR với I=0 atomic khi process đầu tiên vào user mode. Enabling IRQs sớm
+hơn race với kmain: timer preempt → schedule() save kmain's SVC state vào
+`processes[0].ctx`, đè initial frame → context_switch kế tiếp load SP sai.
 
 ---
 
@@ -502,7 +505,7 @@ tick → fail sớm thay vì treo.
 |------|---------|
 | [kernel/drivers/intc/](../../kernel/drivers/intc/) | INTC driver + dispatch |
 | [kernel/drivers/timer/](../../kernel/drivers/timer/) | Timer driver |
-| [kernel/include/irq.h](../../kernel/include/irq.h) | Public API + IRQ constants |
+| [kernel/include/drivers/intc.h](../../kernel/include/drivers/intc.h) | Subsystem contract + IRQ dispatch API |
 | [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | IRQ entry (srsdb/rfefd) |
 | [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | `handle_irq` dispatch |
 | [kernel/main.c](../../kernel/main.c) | Wire + T6 |

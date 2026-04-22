@@ -449,7 +449,8 @@ NULL test verify rằng entry 0 thật sự là FAULT — MMU chặn access thay
 | [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Page table builder |
 | [kernel/arch/arm/mm/mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S) | Assembly enable sequence |
 | [kernel/arch/arm/mm/mmu.c](../../kernel/arch/arm/mm/mmu.c) | Init orchestration |
-| [kernel/include/board.h](../../kernel/include/board.h) | RAM_BASE, PHYS_OFFSET, peripheral addresses |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | RAM_BASE, PHYS_OFFSET, peripheral addresses per-board |
+| [kernel/platform/qemu/periph_map.c](../../kernel/platform/qemu/periph_map.c) / [bbb/periph_map.c](../../kernel/platform/bbb/periph_map.c) | `platform_map_peripherals()` — PA-safe literal map of each board's MMIO windows |
 | [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | Dual MEMORY PHYS/VIRT, `.bss.pgd` placement, `_start_phys` e_entry |
 | [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | (same cho BBB) |
 

@@ -60,10 +60,11 @@ flowchart LR
     C --> D[uart_init]
     D --> E[mmu_init]
     E --> F[exception_init]
-    F --> G[irq_init + timer_init<br/>irq_cpu_enable]
-    G --> H["★ process_init_all<br/>(3 PCB, 3 PGD,<br/>copy user_stub)"]
-    H --> I["boot self-tests<br/>T1–T9"]
-    I --> J[idle loop<br/>timer ticks]
+    F --> G[irq_init + timer_init<br/>irq_register + irq_enable]
+    G --> H["★ process_init_all<br/>(3 PCB, 3 PGD,<br/>copy user binaries)"]
+    H --> DI[mmu_drop_identity]
+    DI --> SH[timer_set_handler<br/>= scheduler_tick]
+    SH --> PFR["process_first_run<br/>(rfefd → USR,<br/>CPSR.I=0 atomic)"]
 
     style H fill:#ffe699,stroke:#e8a700,color:#000
 ```
@@ -355,7 +356,7 @@ sequenceDiagram
     participant PG as pgtable_build_for_proc
     participant PCB as processes[i]
 
-    KM->>PI: sau irq_cpu_enable
+    KM->>PI: sau irq_init + irq_enable per-line
     loop i = 0, 1, 2
         PI->>PCB: zero, set pid/name/state=READY
         PI->>PCB: pgd = proc_pgd[i]<br/>kstack = proc_kstack[i]<br/>user_pa = RAM+0x200000+i*0x100000
@@ -413,7 +414,8 @@ user code ở `0x40000000` giờ trỏ đúng PA của process mới.
 | [kernel/arch/arm/proc/user_stub.S](../../kernel/arch/arm/proc/user_stub.S) | Inline user stub (section `.user_stub`) |
 | [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Thêm `pgtable_build_for_proc` |
 | [kernel/include/mmu.h](../../kernel/include/mmu.h) | Thêm `PDE_USER_TEXT`, prototype mới |
-| [kernel/include/board.h](../../kernel/include/board.h) | `USER_VIRT_BASE`, `NUM_PROCESSES`, `KSTACK_SIZE`, v.v. |
+| [kernel/include/platform.h](../../kernel/include/platform.h) | `USER_VIRT_BASE`, `NUM_PROCESSES`, `KSTACK_SIZE` (shared VA layout) |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | Per-board addresses + `USER_PHYS_BASE`, `USER_PHYS_STRIDE` |
 | [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | Section `.user_stub`, input pattern `.bss.proc_pgd` aligned 16 KB |
 | [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | Tương tự kernel_qemu.ld |
 | [kernel/main.c](../../kernel/main.c) | Gọi `process_init_all()`, tests T7/T8/T9 |
@@ -467,11 +469,14 @@ quyền thực).
 **Wire vào kmain** (sau IRQ setup):
 
 ```c
-irq_cpu_enable();
-
 process_init_all();            /* ★ dựng 3 PCB */
 
-run_boot_tests();              /* T7/T8/T9 verify ngay */
+mmu_drop_identity();           /* identity RAM PA→PA xoá sau khi copy binaries */
+
+timer_set_handler(scheduler_tick);   /* arm preemption — cho đến giờ timer
+                                      * chỉ bump tick_count, không preempt */
+
+process_first_run(&processes[0]);    /* rfefd → USR, CPSR.I=0 atomic */
 ```
 
 Thứ tự không đảo được: `process_init_all` đọc `boot_pgd` (đã có từ `mmu_init`) và dùng

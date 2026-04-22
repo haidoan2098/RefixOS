@@ -421,9 +421,10 @@ và prompt biến mất.
 
 | File | Vai trò |
 |---|---|
-| [kernel/drivers/uart/uart.c](../../kernel/drivers/uart/uart.c) | Enable RX IRQ, ring buffer, `uart_rx_irq` |
-| [kernel/drivers/uart/uart.h](../../kernel/drivers/uart/uart.h) | Public API cho handler + pop/empty |
-| [kernel/include/board.h](../../kernel/include/board.h) | `IRQ_UART0 = 44` cho QEMU |
+| [kernel/drivers/uart/uart_core.c](../../kernel/drivers/uart/uart_core.c) | RX ring buffer + `uart_rx_irq` subsystem dispatch |
+| [kernel/drivers/uart/pl011.c](../../kernel/drivers/uart/pl011.c) / [ns16550.c](../../kernel/drivers/uart/ns16550.c) | Chip `rx_irq` op: drain FIFO → `uart_rx_push` |
+| [kernel/include/drivers/uart.h](../../kernel/include/drivers/uart.h) | Contract `struct uart_ops` + `uart_rx_push/pop/empty` |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | `IRQ_UART0 = 44` (QEMU) / `72` (BBB) |
 | [kernel/sched/scheduler.c](../../kernel/sched/scheduler.c) | `scheduler_block_on_input`, `scheduler_wake_reader` |
 | [kernel/syscall/syscall.c](../../kernel/syscall/syscall.c) | `sys_read`, `sys_ps`, `sys_kill` handlers |
 | [kernel/include/syscall.h](../../kernel/include/syscall.h) | `SYS_READ=4`, `SYS_PS=5`, `SYS_KILL=6` |

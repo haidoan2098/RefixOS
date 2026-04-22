@@ -423,7 +423,7 @@ PHYS_OFFSET để ra PA.
 
 ### UART driver — Nói chuyện với thế giới bên ngoài
 
-File: `kernel/drivers/uart/uart.c`
+Files: `kernel/drivers/uart/uart_core.c` + `pl011.c` (QEMU) hoặc `ns16550.c` (BBB)
 
 UART (Universal Asynchronous Receiver-Transmitter) là hardware gửi/nhận data qua serial port.
 Trên cả QEMU và BBB, đây là cách duy nhất để output text — không có màn hình, không có printf,
@@ -547,11 +547,13 @@ và IRQ vẫn masked.
 |------|---------|
 | `kernel/arch/arm/boot/start.S` | Reset entry point, setup stacks, zero BSS, jump C |
 | `kernel/main.c` | C entry point, boot log |
-| `kernel/drivers/uart/uart.c` | UART driver (PL011 + NS16550) |
-| `kernel/drivers/uart/uart.h` | UART public API |
-| `kernel/include/board.h` | Hardware addresses cho cả 2 platform |
-| `kernel/linker/kernel_qemu.ld` | Linker script QEMU |
-| `kernel/linker/kernel_bbb.ld` | Linker script BBB |
+| `kernel/drivers/uart/uart_core.c` | UART subsystem — ring buffer + printf + dispatch |
+| `kernel/drivers/uart/pl011.c` | `struct uart_ops pl011_ops` — QEMU |
+| `kernel/drivers/uart/ns16550.c` | `struct uart_ops ns16550_ops` — BBB |
+| `kernel/include/drivers/uart.h` | Subsystem contract (ops + API) |
+| `kernel/platform/<board>/board.h` | Hardware addresses per-board |
+| `kernel/platform/<board>/board.c` | `platform_init_devices()` — bind chip ops + addresses |
+| `kernel/linker/kernel_qemu.ld` / `kernel_bbb.ld` | Per-platform linker scripts |
 
 ### Dependencies
 

@@ -142,8 +142,8 @@ CPU vẫn chạy ở PA → identity map giữ PC valid.
 ldr pc, =_start_va    @ absolute load của symbol (resolve sang VA)
 ```
 
-Sau lệnh này PC = `0xC01000xx`. Mọi instruction fetch tiếp theo đi qua
-MMU tại high VA. Kernel không bao giờ còn chạy ở PA.
+Sau lệnh này PC ở high VA (`KERNEL_VIRT_BASE + offset`). Mọi instruction
+fetch tiếp theo đi qua MMU. Kernel không bao giờ còn chạy ở PA.
 
 ### 3.6. Re-setup banked stacks ở VA
 
@@ -300,7 +300,7 @@ Stack direction: ARM convention — grows downward (SP giảm dần).
 
 | Thành phần | Vị trí | Size |
 | --- | --- | --- |
-| Kernel image (.text + .data) | `RAM_BASE`, mapped tại `0xC0100000+` | ~16 KB code |
+| Kernel image (.text + .data) | `RAM_BASE`, mapped tại `KERNEL_VIRT_BASE+` | ~16 KB code |
 | boot_pgd (L1 boot table) | `.bss.pgd`, 16 KB aligned | 16 KB |
 | proc_pgd × 3 | `.bss.proc_pgd` | 48 KB |
 | Exception stacks | `.stack` (NOLOAD) | 11.5 KB |

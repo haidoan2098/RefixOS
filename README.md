@@ -7,24 +7,25 @@
 
 ## Trạng thái
 
-Implemented end-to-end trên **QEMU realview-pb-a8**: boot → MMU → preemptive
-scheduler → syscall ABI → shell với 6 lệnh. BBB port (NS16550 UART RX IRQ) chưa
-wire — nhưng kernel + user binaries build clean cho cả hai platform.
+Implemented end-to-end trên cả **QEMU realview-pb-a8** và **BeagleBone Black**:
+boot → MMU → preemptive scheduler → syscall ABI → shell với 6 lệnh. Cùng
+code base chạy trên cả hai — chọn platform tại build time.
 
 ---
 
 ## Build + chạy
 
 ```bash
-make                          # build cho QEMU (default)
+make                          # build QEMU (default)
 bash scripts/qemu/run.sh      # chạy interactive — shell prompt sau ~1 s
 ```
 
 Thoát QEMU: `Ctrl+A` rồi `x`.
 
 ```bash
-make PLATFORM=bbb             # build cho BeagleBone Black (chưa flash thử)
-make clean
+make PLATFORM=bbb                       # build kernel.bin + MLO (SPL)
+sudo bash scripts/bbb/flash.sh /dev/sdX # ghi SD card: MLO vào FAT, kernel raw @ sector 2048
+# cắm SD vào BBB, UART0 @ 115200 8N1, power on
 ```
 
 ---
@@ -47,26 +48,37 @@ Sau khi boot, gõ vào prompt `shell>`:
 ## Kiến trúc
 
 ```text
-┌─────────────────────────────────────────────┐
-│              USERSPACE (USR)                │
-│   counter   ·   runaway   ·   shell         │
-│        │           │            │           │
-│        └─── crt0 + libc + svc ──┘           │
-├─────────────────────────────────────────────┤
-│             KERNEL (SVC)                    │
-│   Scheduler  ·  Syscall dispatch            │
-│   Context switch  ·  Exception handlers     │
-│   MMU + per-process page table              │
-│   Drivers: UART · Timer · INTC              │
-├─────────────────────────────────────────────┤
-│                 HARDWARE                    │
-│      ARMv7-A Cortex-A8 / DDR3 / UART        │
-└─────────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│              USERSPACE (USR)                  │
+│   counter   ·   runaway   ·   shell           │
+│        │           │            │             │
+│        └─── crt0 + libc + svc ──┘             │
+├───────────────────────────────────────────────┤
+│             KERNEL CORE (SVC)                 │
+│   Scheduler  ·  Process  ·  Syscall           │
+│   Context switch  ·  Exception + MMU          │
+├───────────────────────────────────────────────┤
+│           SUBSYSTEMS (drivers/*)              │
+│   uart_core  ·  timer_core  ·  intc_core      │
+│   (dispatch via struct *_ops)                 │
+├───────────────────────────────────────────────┤
+│     CHIP DRIVERS         │   BOARD WIRE-UP    │
+│   PL011 · NS16550        │   platform/qemu/   │
+│   SP804 · DMTIMER        │   platform/bbb/    │
+│   GIC v1 · AM335x INTC   │   (board.c picks   │
+│                          │    which chip)     │
+├───────────────────────────────────────────────┤
+│                 HARDWARE                      │
+│      ARMv7-A Cortex-A8 / DDR / UART           │
+└───────────────────────────────────────────────┘
 ```
 
-Kernel linked tại VA `0xC0100000`, user tại VA `0x40000000` (3G/1G split kiểu
-Linux ARM). Mỗi process có page table 16 KB + kernel stack 8 KB + user PA slot
-1 MB riêng — process A crash không corrupt B/C.
+Kernel core depend duy nhất trên `drivers/<subsys>.h` contract (struct ops).
+Thêm board mới = tạo `platform/<name>/board.c` + `platform.mk` liệt kê chip
+drivers; không đụng core. User link tại VA `0x40000000`, kernel link tại
+`KERNEL_VIRT_BASE = 0xC0000000` (3G/1G split kiểu Linux ARM). Mỗi process có
+page table 16 KB + kernel stack 8 KB + user PA slot 1 MB riêng — process A
+crash không corrupt B/C.
 
 ---
 
@@ -104,26 +116,30 @@ Không phụ thuộc thư viện ngoài.
 
 ```text
 kernel/
-├── arch/arm/        # boot, exception, mmu, proc (asm + arch-specific C)
-├── drivers/         # uart, timer, intc
-├── proc/            # PCB + process_init
-├── sched/           # round-robin scheduler
-├── syscall/         # dispatch + handlers
-├── include/         # public headers
-├── linker/          # platform linker scripts
-└── main.c
+├── main.c
+├── arch/arm/                  # boot, exception, mmu, context switch
+├── proc/ sched/ syscall/      # core kernel — platform-agnostic
+├── drivers/                   # subsystem + chip drivers (Linux-style)
+│   ├── uart/                  # uart_core + pl011 + ns16550
+│   ├── timer/                 # timer_core + sp804 + dmtimer
+│   └── intc/                  # intc_core + gicv1 + am335x_intc
+├── platform/                  # board wire-up only
+│   ├── qemu/                  # board.h, board.c, platform.mk, periph_map.c
+│   └── bbb/                   # same layout, different chips + addresses
+├── include/
+│   ├── drivers/               # struct *_ops contract per subsystem
+│   └── *.h                    # kernel API (proc, scheduler, syscall, ...)
+└── linker/                    # per-platform linker scripts
 
 user/
-├── crt0.S           # entry: bl main → sys_exit
-├── libc/            # syscall wrappers + putu/puts/strcmp/atoi
-├── linker/user.ld   # link tại 0x40000000
-└── apps/
-    ├── counter/     # in số định kỳ + yield
-    ├── runaway/     # busy loop không yield (preemption test)
-    └── shell/       # 6-command interactive
+├── crt0.S                     # entry: bl main → sys_exit
+├── libc/                      # syscall wrappers + minimal string/print
+├── linker/user.ld             # link tại 0x40000000
+└── apps/                      # counter, runaway, shell
 
-docs/                # architecture + per-chapter walkthroughs
-scripts/qemu/        # QEMU launcher
+bootloader/                    # BBB SPL → builds MLO, loads kernel from SD
+docs/                          # architecture + per-chapter walkthroughs
+scripts/qemu/ scripts/bbb/     # launcher + SD flasher
 ```
 
 ---
