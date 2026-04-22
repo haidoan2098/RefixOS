@@ -101,15 +101,12 @@ void kmain(void)
      * bumped tick_count but schedule() stayed a no-op. */
     timer_set_handler(scheduler_tick);
 
-    /* IRQs stay masked at CPU level throughout kmain. ret_from_
-     * first_entry's rfefd restores USR CPSR with I=0 when the
-     * first process enters user mode — from there every exception
-     * re-enters with I=1, so the kernel never runs a process on a
-     * stack that another path might yank. Enabling IRQs earlier
-     * races with kmain: a preemption would save kmain's SVC state
-     * into processes[0].ctx, overwriting the initial frame built
-     * by process_build_initial_frame and corrupting that PCB's
-     * future resume. */
+    /* IRQs stay CPU-masked throughout kmain. ret_from_first_entry's
+     * rfefd restores USR CPSR with I=0 atomically when the first
+     * process enters user mode; every exception thereafter re-enters
+     * with I=1. Enabling IRQs while kmain is still running would let
+     * a timer preemption save kmain's SVC state into processes[0].ctx
+     * and clobber the initial frame built by process_build_initial_frame. */
     uart_printf("[BOOT] boot complete — entering user mode pid=%u "
                 "(USR @ 0x%08x)\n",
                 processes[0].pid, processes[0].user_entry);

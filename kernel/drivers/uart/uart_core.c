@@ -67,8 +67,9 @@ void uart_rx_irq(void)
 }
 
 /* ============================================================
- *  Formatting — platform-independent, sits entirely on top of
- *  uart_putc(). Duplicated nowhere else after this refactor.
+ *  Formatting — sits entirely on top of uart_putc(). Chip drivers
+ *  touch hardware; everything below only emits bytes via the
+ *  subsystem dispatch.
  * ============================================================ */
 
 void uart_puts(const char *s)

@@ -2,9 +2,9 @@
  * kernel/platform/bbb/board.c — BeagleBone Black (AM335x) wire-up
  *
  * Picks a chip driver for each subsystem and binds it to a
- * physical address + IRQ. DMTIMER2 needs CM_PER clock gating
- * enabled before the timer driver can touch it — that's board-
- * specific (CM_PER belongs to this SoC), so we do it here.
+ * physical address + IRQ. DMTIMER2's CM_PER clock gate + CLKSEL
+ * mux are AM335x-specific, so they live here instead of in the
+ * generic dmtimer driver.
  *
  *   UART : NS16550      @ 0x44E09000, IRQ 72
  *   Timer: DMTIMER2     @ 0x48040000, IRQ 68, 24 MHz
@@ -57,12 +57,13 @@ static struct intc_device bbb_intc = {
  *
  * CLKSEL_TIMER2_CLK bits[1:0] select which clock feeds DMTIMER2:
  *   0x0 = TCLKIN      (external pin — usually floating)
- *   0x1 = CLK_M_OSC   (24 MHz — what our driver assumes)
+ *   0x1 = CLK_M_OSC   (24 MHz — matches dmtimer.c clk_hz)
  *   0x2 = CLK_32KHZ   (32.768 kHz)
  *
- * Reset default is not M_OSC, so if the bootloader leaves this
- * alone the timer runs at a random slow rate. AM335x TRM requires
- * changing CLKSEL only while the module is in DISABLED idle state.
+ * Reset default is not M_OSC, and the bootloader may leave it as
+ * TCLKIN or 32KHZ — in which case DMTIMER2 would run at a random
+ * slow rate. AM335x TRM requires changing CLKSEL only while the
+ * module is in DISABLED idle state.
  */
 #define CM_DPLL_BASE            0x44E00500U
 #define CM_CLKSEL_TIMER2_CLK    0x08U
