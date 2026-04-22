@@ -47,7 +47,6 @@ static void cmd_help(void)
     ulib_puts("commands:\n"
               "  help         — this list\n"
               "  ps           — list processes\n"
-              "  ticks        — print timer tick_count (diag)\n"
               "  kill <pid>   — kill a process\n"
               "  echo <text>  — print text\n"
               "  clear        — clear the screen\n"
@@ -87,13 +86,6 @@ static void cmd_clear(void)
     ulib_puts("\x1b[2J\x1b[H");
 }
 
-static void cmd_ticks(void)
-{
-    ulib_puts("ticks=");
-    ulib_putu(sys_ticks());
-    ulib_putc('\n');
-}
-
 static void cmd_crash(void)
 {
     ulib_puts("crash: about to NULL-deref — kernel should survive\n");
@@ -108,7 +100,6 @@ static void dispatch(char *line)
     if (*p == '\0')                         { return; }
     if ((rest = match_word(p, "help")))     { cmd_help();       return; }
     if ((rest = match_word(p, "ps")))       { cmd_ps();         return; }
-    if ((rest = match_word(p, "ticks")))    { cmd_ticks();      return; }
     if ((rest = match_word(p, "kill")))     { cmd_kill(rest);   return; }
     if ((rest = match_word(p, "echo")))     { cmd_echo(rest);   return; }
     if ((rest = match_word(p, "clear")))    { cmd_clear();      return; }

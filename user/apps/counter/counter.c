@@ -8,29 +8,35 @@
 
 #include "ulib.h"
 
-/* Rough one-second busy loop on QEMU TCG. Adjust if output is
- * too fast or too slow on hardware. */
-#define DELAY_ITERATIONS    2000000U
+/* ~3 s per print regardless of platform clock speed. Yield while
+ * waiting so other processes get CPU during the delay. */
+#define DELAY_TICKS     300U    /* 300 × 10 ms = 3 s */
 
-static void busy_delay(unsigned int n)
+static void delay_wall(unsigned int ticks)
 {
-    volatile unsigned int i;
-    for (i = 0; i < n; i++)
-        __asm__ volatile("" ::: "memory");
+    unsigned int start = sys_ticks();
+    while ((sys_ticks() - start) < ticks)
+        sys_yield();
 }
 
 int main(void)
 {
     unsigned int count = 0;
+    unsigned int prev  = sys_ticks();
 
     for (;;) {
+        unsigned int now = sys_ticks();
+        unsigned int dt  = now - prev;                 /* 10 ms units */
+        prev = now;
+
         ulib_tag();
         ulib_puts("count=");
         ulib_putu(count++);
-        ulib_putc('\n');
+        ulib_puts("  dt=");
+        ulib_putu(dt * 10U);                           /* ms */
+        ulib_puts("ms\n");
 
-        busy_delay(DELAY_ITERATIONS);
-        sys_yield();
+        delay_wall(DELAY_TICKS);
     }
 
     return 0;   /* unreachable */
