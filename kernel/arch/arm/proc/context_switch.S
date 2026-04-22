@@ -59,6 +59,9 @@ context_switch:
     mcr     p15, 0, r2, c2, c0, 0
     mov     r2, #0
     mcr     p15, 0, r2, c8, c7, 0           @ TLBIALL
+    mcr     p15, 0, r2, c7, c5, 0           @ ICIALLU — stale I-cache
+                                            @ from previous process's
+                                            @ user VA must not leak.
     dsb
     isb
 

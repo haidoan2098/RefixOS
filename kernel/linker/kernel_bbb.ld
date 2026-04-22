@@ -46,7 +46,11 @@ SECTIONS
         *(.vectors)         /* exception vector table           */
         *(.text*)
         *(.rodata*)
-        . = ALIGN(4);
+        /* Align to 16 so the next section (which has its own
+         * 16-byte alignment requirement on VMA) starts at a
+         * boundary that matches its LMA — otherwise AT> PHYS
+         * can drift by a few bytes relative to VMA. */
+        . = ALIGN(16);
         _text_end = .;
     } > VIRT AT> PHYS
 

@@ -62,7 +62,10 @@ void schedule(void)
         }
         switch_count++;
 
-        prev->state = TASK_READY;
+        /* Only demote still-running processes back to READY — do
+         * not resurrect a DEAD or BLOCKED prev. */
+        if (prev->state == TASK_RUNNING)
+            prev->state = TASK_READY;
         cand->state = TASK_RUNNING;
         current = cand;
 

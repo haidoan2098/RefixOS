@@ -11,6 +11,7 @@
 
 #include "exception.h"
 #include "irq.h"
+#include "proc.h"
 #include "scheduler.h"
 #include "syscall.h"
 #include "uart/uart.h"
@@ -90,6 +91,34 @@ static void halt_forever(void)
 }
 
 /* ===========================================================
+ * User-mode fault helpers
+ *
+ * A fault whose saved SPSR is in USR mode came from user code:
+ * the kernel survives, the offending process is retired and a
+ * reschedule is forced so someone else gets the CPU. A fault
+ * with any other saved mode is a kernel bug — panic outright.
+ * =========================================================== */
+static int fault_from_user(const exception_context_t *ctx)
+{
+    return (ctx->spsr & 0x1FU) == 0x10U;
+}
+
+static void user_fault_kill(const char *kind)
+{
+    if (current) {
+        uart_printf("[KILL] pid=%u name=%s killed by %s\n",
+                    current->pid, current->name, kind);
+        current->state = TASK_DEAD;
+    }
+    scheduler_request_resched();
+    schedule();
+
+    /* Fall through only if no other runnable process remains. */
+    uart_printf("[PANIC] no runnable process left after user fault\n");
+    halt_forever();
+}
+
+/* ===========================================================
  * Data Abort handler
  * =========================================================== */
 void handle_data_abort(exception_context_t *ctx)
@@ -97,7 +126,14 @@ void handle_data_abort(exception_context_t *ctx)
     uint32_t dfsr = read_dfsr();
     uint32_t dfar = read_dfar();
 
-    uart_printf("\n[PANIC] *** DATA ABORT ***\n");
+    if (fault_from_user(ctx)) {
+        uart_printf("[FAULT] data abort  DFAR=0x%08x DFSR=0x%08x PC=0x%08x\n",
+                    dfar, dfsr, ctx->lr);
+        user_fault_kill("data abort");
+        return;     /* unreachable if schedule swapped away */
+    }
+
+    uart_printf("\n[PANIC] *** DATA ABORT (kernel) ***\n");
     uart_printf("  DFAR = 0x%08x  (faulting address)\n", dfar);
     uart_printf("  DFSR = 0x%08x  (fault status)\n", dfsr);
     dump_context(ctx);
@@ -112,7 +148,14 @@ void handle_prefetch_abort(exception_context_t *ctx)
     uint32_t ifsr = read_ifsr();
     uint32_t ifar = read_ifar();
 
-    uart_printf("\n[PANIC] *** PREFETCH ABORT ***\n");
+    if (fault_from_user(ctx)) {
+        uart_printf("[FAULT] prefetch abort  IFAR=0x%08x IFSR=0x%08x\n",
+                    ifar, ifsr);
+        user_fault_kill("prefetch abort");
+        return;
+    }
+
+    uart_printf("\n[PANIC] *** PREFETCH ABORT (kernel) ***\n");
     uart_printf("  IFAR = 0x%08x  (faulting address)\n", ifar);
     uart_printf("  IFSR = 0x%08x  (fault status)\n", ifsr);
     dump_context(ctx);
@@ -124,7 +167,13 @@ void handle_prefetch_abort(exception_context_t *ctx)
  * =========================================================== */
 void handle_undefined(exception_context_t *ctx)
 {
-    uart_printf("\n[PANIC] *** UNDEFINED INSTRUCTION ***\n");
+    if (fault_from_user(ctx)) {
+        uart_printf("[FAULT] undefined instr at PC=0x%08x\n", ctx->lr);
+        user_fault_kill("undefined instruction");
+        return;
+    }
+
+    uart_printf("\n[PANIC] *** UNDEFINED INSTRUCTION (kernel) ***\n");
     dump_context(ctx);
     halt_forever();
 }

@@ -87,6 +87,31 @@ static void kmemset(void *dst, uint8_t v, uint32_t n)
 }
 
 /* -----------------------------------------------------------
+ * icache_sync — make freshly-written instruction bytes visible
+ * to the I-fetch path.
+ *
+ * ARMv7-A separates L1 D-cache and I-cache. When the kernel
+ * memcpy's a user image through the data path (via the high-VA
+ * alias), the bytes sit in D-cache until cleaned to the Point
+ * of Unification. Without this sync, the user's first fetch can
+ * return whatever RAM held before the copy (often zero). Pair
+ * the clean with an I-cache invalidate and a DSB/ISB to finish.
+ * ----------------------------------------------------------- */
+static void icache_sync(void *va, uint32_t len)
+{
+    uintptr_t start = (uintptr_t)va & ~(uintptr_t)31;   /* 32-byte line */
+    uintptr_t end   = (uintptr_t)va + len;
+
+    for (uintptr_t a = start; a < end; a += 32) {
+        __asm__ volatile("mcr p15, 0, %0, c7, c11, 1" :: "r"(a));   /* DCCMVAU */
+    }
+    __asm__ volatile("dsb" ::: "memory");
+    __asm__ volatile("mcr p15, 0, %0, c7, c5, 0" :: "r"(0));        /* ICIALLU */
+    __asm__ volatile("dsb" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+}
+
+/* -----------------------------------------------------------
  * process_build_initial_frame — pre-construct two stacked frames
  * so that context_switch(NULL|prev, p) lands the process in USR
  * mode at user_entry using the same code path a preempted resume
@@ -177,10 +202,13 @@ void process_init_all(void)
 
         /* Copy this process's user image into its PA slot. Reach
          * the PA through the high-VA alias (PA + PHYS_OFFSET) so
-         * we never touch identity mapping. */
+         * we never touch identity mapping. Clean D-cache + flush
+         * I-cache so the user's first instruction fetch sees the
+         * freshly-written bytes (see icache_sync above). */
         void *user_va = (void *)(p->user_phys_base + PHYS_OFFSET);
         kmemset(user_va, 0, USER_REGION_SIZE);
         kmemcpy(user_va, img->start, img_size);
+        icache_sync(user_va, img_size);
 
         /* Build the per-process L1 table: kernel mirror + user
          * section at 0x40000000 → p->user_phys_base */
