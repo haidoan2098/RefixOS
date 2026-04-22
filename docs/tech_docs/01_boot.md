@@ -413,7 +413,7 @@ VMA 0xC0100000  ┌──────────────────┐  LM
                 ├──────────────────┤
                 │ .stack (NOLOAD)  │  FIQ 512 · IRQ 1K · ABT 1K · UND 1K · SVC 8K
                 ├──────────────────┤
-                │ _heap_start      │  (future kmalloc)
+                │ _end             │  không có heap allocator
                 ▼                  ▼
 ```
 

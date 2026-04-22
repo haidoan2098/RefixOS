@@ -1,117 +1,142 @@
 # RingNova
 
-> Một nhân hệ điều hành tối giản, xây dựng từ đầu trên kiến trúc ARMv7-A.
+> Bare-metal kernel viết từ đầu trên ARMv7-A. 3 user process chạy preemptive
+> qua shell tương tác — toàn bộ ~5000 dòng C + assembly, không framework.
 
 ---
 
-## 1. Giới thiệu
+## Trạng thái
 
-**RingNova** là dự án xây dựng một OS kernel từ đầu (from scratch) trên nền tảng ARM Cortex-A8, cụ thể là bo mạch BeagleBone Black. Không phải một bản clone hay port của Linux, mà là một cài đặt độc lập của các cơ chế cốt lõi mà một hệ điều hành hiện đại thực sự cần có.
-
-Dự án không hướng đến việc tạo ra một OS hoàn chỉnh. Mục tiêu duy nhất là **hiểu sâu bằng cách tự xây dựng** — từ exception vector, MMU, context switch, cho đến preemptive scheduling — tất cả đều viết tay, không dựa vào framework hay thư viện có sẵn.
-
----
-
-## 2. Nền tảng
-
-| | |
-|---|---|
-| **Phần cứng** | BeagleBone Black (AM335x, Cortex-A8) |
-| **Kiến trúc** | ARMv7-A |
-| **Môi trường phát triển** | QEMU → BeagleBone Black |
-| **Bootloader** | U-Boot (vendor) |
-| **Toolchain** | `arm-none-eabi-gcc`, GNU Binutils, GDB |
+Implemented end-to-end trên **QEMU realview-pb-a8**: boot → MMU → preemptive
+scheduler → syscall ABI → shell với 6 lệnh. BBB port (NS16550 UART RX IRQ) chưa
+wire — nhưng kernel + user binaries build clean cho cả hai platform.
 
 ---
 
-## 3. Kiến trúc & Thành phần
+## Build + chạy
 
-RingNova được tổ chức xung quanh 4 trục kỹ thuật cốt lõi. Các trục này không độc lập — chúng phụ thuộc nhau theo đúng thứ tự xây dựng: phải có exception model trước thì kernel mới tiếp nhận được quyền điều khiển; phải có kernel ổn định thì mới bật MMU được; phải có MMU thì isolation giữa các process mới là thật.
+```bash
+make                          # build cho QEMU (default)
+bash scripts/qemu/run.sh      # chạy interactive — shell prompt sau ~1 s
+```
 
-Ngoài 4 trục chính, hệ thống còn có một số thành phần hạ tầng phải được xây dựng sớm — cụ thể là debug output và kernel allocator — vì toàn bộ các thành phần còn lại đều phụ thuộc vào chúng.
+Thoát QEMU: `Ctrl+A` rồi `x`.
 
----
-
-### 3.1. Privilege & Exception
-
-Kernel thiết lập ranh giới cứng giữa User mode và Kernel mode theo mô hình đặc quyền của ARM. Mọi yêu cầu từ user space vào kernel — dù là system call, interrupt hay fault — đều đi qua exception vector table được cài đặt thủ công. Không có đường tắt nào.
-
-Khi exception xảy ra, CPU chuyển sang exception mode tương ứng (IRQ/SVC/ABT) nhưng exception stack chỉ dùng làm **trampoline** — save vài registers rồi switch sang SVC mode và kernel stack per-process ngay lập tức. Toàn bộ xử lý thực tế diễn ra trên kernel stack per-process, theo đúng pattern Linux ARM.
-
-**Thành phần liên quan:** Exception vector table, SVC handler, IRQ handler, trap handler.
+```bash
+make PLATFORM=bbb             # build cho BeagleBone Black (chưa flash thử)
+make clean
+```
 
 ---
 
-### 3.2. Virtual Memory
+## Demo
 
-MMU được bật và cấu hình từ đầu, không dùng flat memory model. Kernel ánh xạ tại địa chỉ cao (`0xC0000000+`) và hoàn toàn không nhìn thấy từ user space. Mỗi process có page table riêng; ARMv7 hỗ trợ TTBR0 cho user space và TTBR1 cho kernel space, cho phép tách biệt hai vùng mà không cần flush toàn bộ TLB khi context switch.
+Sau khi boot, gõ vào prompt `shell>`:
 
-**Thành phần liên quan:** MMU initialization, page table management, TTBR0/TTBR1 configuration, identity map boot stage.
-
----
-
-### 3.3. Process & Context Switch
-
-Mỗi process được đại diện bởi một PCB lưu toàn bộ trạng thái: register set, kernel stack pointer, page table base và execution state. Context switch được viết bằng assembly — lưu đầy đủ r0–r15 và CPSR, sau đó swap TTBR0 trước khi khôi phục trạng thái của process tiếp theo.
-
-Mỗi process có 4 trạng thái:
-
-| State | Ý nghĩa |
-|---|---|
-| `READY` | Sẵn sàng chạy, nằm trong run queue |
-| `RUNNING` | Đang chiếm CPU |
-| `BLOCKED` | Chờ event (UART input), bị loại khỏi run queue |
-| `DEAD` | Đã exit hoặc bị kill, scheduler không bao giờ pick |
-
-**Thành phần liên quan:** PCB, kernel stack per-process (8 KB), context switch routine (assembly).
+| Lệnh          | Tác dụng                                                            |
+| ------------- | ------------------------------------------------------------------- |
+| `help`        | List 6 lệnh                                                         |
+| `ps`          | Show pid + state của 3 process                                      |
+| `kill <pid>`  | Mark process DEAD, scheduler skip                                   |
+| `echo <text>` | Print lại                                                           |
+| `clear`       | ANSI clear screen                                                   |
+| `crash`       | Shell NULL-deref → fault isolation demo (kernel + counter vẫn chạy) |
 
 ---
 
-### 3.4. Preemptive Scheduling
+## Kiến trúc
 
-Scheduler được kích hoạt bởi timer hardware (DMTIMER2), không phải bởi sự tự nguyện của process. Mỗi khi timer IRQ phát sinh, scheduler quyết định process nào chạy tiếp theo theo cơ chế round-robin. Không có process nào giữ CPU vô thời hạn. Isolation là thật — một process lỗi không ảnh hưởng đến process khác.
+```text
+┌─────────────────────────────────────────────┐
+│              USERSPACE (USR)                │
+│   counter   ·   runaway   ·   shell         │
+│        │           │            │           │
+│        └─── crt0 + libc + svc ──┘           │
+├─────────────────────────────────────────────┤
+│             KERNEL (SVC)                    │
+│   Scheduler  ·  Syscall dispatch            │
+│   Context switch  ·  Exception handlers     │
+│   MMU + per-process page table              │
+│   Drivers: UART · Timer · INTC              │
+├─────────────────────────────────────────────┤
+│                 HARDWARE                    │
+│      ARMv7-A Cortex-A8 / DDR3 / UART        │
+└─────────────────────────────────────────────┘
+```
 
-**Thành phần liên quan:** Timer driver (DMTIMER2), IRQ handler, round-robin scheduler.
-
----
-
-### 3.5. Hạ tầng hỗ trợ
-
-Các thành phần dưới đây không thuộc 4 trục chính nhưng là điều kiện cần để toàn bộ hệ thống hoạt động và kiểm thử được.
-
-| # | Thành phần | Vai trò |
-|---|---|---|
-| 1 | **UART / printk** | Debug output và kernel panic — xây dựng đầu tiên, trước mọi thứ khác |
-| 2 | **System calls** | Interface từ user space vào kernel qua SVC: `write`, `read`, `exit`, `yield`, `getpid`, `ps`, `meminfo`, `kill`. Mọi pointer từ user space được validate trước khi kernel deref |
-| 3 | **Minimal libc** | Tự viết — đủ để user process chạy được, không dùng glibc |
-| 4 | **Minimal shell** | Môi trường tương tác qua UART để kiểm thử toàn bộ hệ thống |
-
----
-
-## 4. Phạm vi dự án
-
-RingNova được giới hạn có chủ đích. Các thành phần dưới đây nằm ngoài phạm vi:
-
-- Filesystem, VFS, mount
-- Networking stack
-- `fork` / `exec`
-- POSIX compliance
-- Signals, pipe, socket
-- **IPC (shared memory / message passing)** — monolithic kernel không cần IPC là core
-- Display / HDMI
-- Dynamic allocation (kmalloc), page allocator
-- SMP / multi-core
+Kernel linked tại VA `0xC0100000`, user tại VA `0x40000000` (3G/1G split kiểu
+Linux ARM). Mỗi process có page table 16 KB + kernel stack 8 KB + user PA slot
+1 MB riêng — process A crash không corrupt B/C.
 
 ---
 
-## 5. Quan hệ với Linux và GNU
+## Cốt lõi (mỗi mục có chapter doc riêng)
 
-Về tư tưởng thiết kế kernel — high address split, per-process page table, SVC syscall, preemptive scheduling trên ARM — RingNova giải quyết cùng bài toán theo cùng hướng với Linux. Toolchain sử dụng là GNU (`gcc`, `ld`, `gdb`). Libc được tự viết như một bản thay thế tối giản cho glibc.
+| Chapter                                          | Topic                                                                  |
+| ------------------------------------------------ | ---------------------------------------------------------------------- |
+| [00 Foundation](docs/tech_docs/00_foundation.md) | Pre-OS knowledge: ARM modes, banked regs, exception levels             |
+| [01 Boot](docs/tech_docs/01_boot.md)             | start.S, dual MEMORY linker (VMA/LMA split), trampoline VA             |
+| [02 Exceptions](docs/tech_docs/02_exceptions.md) | Vector table, VBAR, abort/SVC/IRQ entries                              |
+| [03 MMU](docs/tech_docs/03_mmu.md)               | 1 MB section mapping, identity bootstrap + drop, high VA alias         |
+| [04 Interrupts](docs/tech_docs/04_interrupts.md) | GIC v1, timer driver, IRQ dispatch                                     |
+| [05 Process](docs/tech_docs/05_process.md)       | 3 PCB static, per-process L1 + kernel stack, initial frame             |
+| [06 Scheduler](docs/tech_docs/06_scheduler.md)   | Bidirectional context_switch, round-robin, BLOCKED state               |
+| [07 Syscall](docs/tech_docs/07_syscall.md)       | r7+r0-r3 ABI, dispatch table, user pointer validation, fault isolation |
+| [08 Userspace](docs/tech_docs/08_userspace.md)   | crt0, libc, per-app build, .incbin bundle, cache sync                  |
+| [09 Shell](docs/tech_docs/09_shell.md)           | UART RX IRQ + ring buffer, sys_read blocking, command parser           |
 
-> Kernel tư tưởng giống Linux. Toolchain là GNU. Code là của riêng mình.
+Memory layout chi tiết: [docs/memory-architecture.md](docs/memory-architecture.md).
+Mô tả dự án: [docs/project-description.md](docs/project-description.md).
 
 ---
 
-## 6. Kết quả kỳ vọng
+## Toolchain
 
-Khi hoàn thành, RingNova sẽ khởi động trên BeagleBone Black thật, chạy 2–3 user process cô lập theo cơ chế preemptive scheduling, tiếp nhận system call từ user space, và cung cấp một minimal shell để tương tác — toàn bộ trên một kernel được viết từng dòng từ đầu.
+- `arm-none-eabi-gcc`, GNU Binutils, GDB
+- QEMU `qemu-system-arm` (machine `realview-pb-a8`)
+- GNU Make
+
+Không phụ thuộc thư viện ngoài.
+
+---
+
+## Tổ chức code
+
+```text
+kernel/
+├── arch/arm/        # boot, exception, mmu, proc (asm + arch-specific C)
+├── drivers/         # uart, timer, intc
+├── proc/            # PCB + process_init
+├── sched/           # round-robin scheduler
+├── syscall/         # dispatch + handlers
+├── include/         # public headers
+├── linker/          # platform linker scripts
+└── main.c
+
+user/
+├── crt0.S           # entry: bl main → sys_exit
+├── libc/            # syscall wrappers + putu/puts/strcmp/atoi
+├── linker/user.ld   # link tại 0x40000000
+└── apps/
+    ├── counter/     # in số định kỳ + yield
+    ├── runaway/     # busy loop không yield (preemption test)
+    └── shell/       # 6-command interactive
+
+docs/                # architecture + per-chapter walkthroughs
+scripts/qemu/        # QEMU launcher
+```
+
+---
+
+## Out of scope
+
+- `fork` / `exec` (process tạo lúc boot, static)
+- Filesystem, VFS, networking
+- POSIX, signals, pipe, socket
+- Dynamic allocation (`kmalloc`), page allocator
+- SMP (single-core only)
+- IPC (shared memory / message passing)
+- Display, HDMI
+
+Đây là kernel học thuật — minimal, không production. Toàn bộ tự viết, không
+clone Linux.

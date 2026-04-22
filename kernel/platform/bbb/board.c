@@ -41,20 +41,48 @@ static struct intc_device bbb_intc = {
     .base = INTC_BASE,
 };
 
-/* AM335x CM_PER registers — gate DMTIMER2 clock */
+/* AM335x CM_PER registers — gate DMTIMER2 module clock */
 #define CM_PER_L4LS_CLKSTCTRL   0x000U
 #define CM_PER_TIMER2_CLKCTRL   0x080U
 
 #define CLKSTCTRL_SW_WKUP       0x2U
+#define MODULEMODE_DISABLE      0x0U
 #define MODULEMODE_ENABLE       0x2U
 #define IDLEST_SHIFT            16
 #define IDLEST_MASK             (0x3U << IDLEST_SHIFT)
 #define IDLEST_FUNC             0x0U
+#define IDLEST_DISABLED         0x3U
+
+/* AM335x CM_DPLL — clock-source mux for DMTIMER1..7
+ *
+ * CLKSEL_TIMER2_CLK bits[1:0] select which clock feeds DMTIMER2:
+ *   0x0 = TCLKIN      (external pin — usually floating)
+ *   0x1 = CLK_M_OSC   (24 MHz — what our driver assumes)
+ *   0x2 = CLK_32KHZ   (32.768 kHz)
+ *
+ * Reset default is not M_OSC, so if the bootloader leaves this
+ * alone the timer runs at a random slow rate. AM335x TRM requires
+ * changing CLKSEL only while the module is in DISABLED idle state.
+ */
+#define CM_DPLL_BASE            0x44E00500U
+#define CM_CLKSEL_TIMER2_CLK    0x08U
+#define TIMER2_CLKSEL_M_OSC     0x1U
 
 static void clock_enable_timer2(void)
 {
+    /* 1. Force module into DISABLED so CLKSEL is safe to write. */
+    REG32(CM_PER_BASE + CM_PER_TIMER2_CLKCTRL) = MODULEMODE_DISABLE;
+    while (((REG32(CM_PER_BASE + CM_PER_TIMER2_CLKCTRL) & IDLEST_MASK)
+             >> IDLEST_SHIFT) != IDLEST_DISABLED)
+        ;
+
+    /* 2. Pick CLK_M_OSC (24 MHz) as DMTIMER2 functional clock. */
+    REG32(CM_DPLL_BASE + CM_CLKSEL_TIMER2_CLK) = TIMER2_CLKSEL_M_OSC;
+
+    /* 3. Wake the L4LS clock domain that hosts DMTIMER2. */
     REG32(CM_PER_BASE + CM_PER_L4LS_CLKSTCTRL) = CLKSTCTRL_SW_WKUP;
 
+    /* 4. Enable the module clock and wait for it to go functional. */
     REG32(CM_PER_BASE + CM_PER_TIMER2_CLKCTRL) = MODULEMODE_ENABLE;
     while (((REG32(CM_PER_BASE + CM_PER_TIMER2_CLKCTRL) & IDLEST_MASK)
              >> IDLEST_SHIFT) != IDLEST_FUNC)

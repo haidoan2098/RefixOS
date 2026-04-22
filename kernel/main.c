@@ -88,8 +88,6 @@ void kmain(void)
     irq_enable(IRQ_TIMER);
     irq_register(IRQ_UART0, uart_rx_irq);   /* wakes sys_read */
     irq_enable(IRQ_UART0);
-    irq_cpu_enable();
-    uart_printf("[IRQ]   CPU IRQ enabled (CPSR.I=0)\n");
 
     process_init_all();
 
@@ -103,6 +101,15 @@ void kmain(void)
      * bumped tick_count but schedule() stayed a no-op. */
     timer_set_handler(scheduler_tick);
 
+    /* IRQs stay masked at CPU level throughout kmain. ret_from_
+     * first_entry's rfefd restores USR CPSR with I=0 when the
+     * first process enters user mode — from there every exception
+     * re-enters with I=1, so the kernel never runs a process on a
+     * stack that another path might yank. Enabling IRQs earlier
+     * races with kmain: a preemption would save kmain's SVC state
+     * into processes[0].ctx, overwriting the initial frame built
+     * by process_build_initial_frame and corrupting that PCB's
+     * future resume. */
     uart_printf("[BOOT] boot complete — entering user mode pid=%u "
                 "(USR @ 0x%08x)\n",
                 processes[0].pid, processes[0].user_entry);

@@ -452,7 +452,7 @@ docs/tech_docs/
 - Syscall table: array function pointers, index bằng syscall number.
 - Pointer validation: user pointer phải nằm trong 0x40000000–0x40FFFFFF.
   Pointer trỏ vào kernel space → return lỗi, không deref.
-- Danh sách syscall: write, read, exit, yield, getpid, ps, meminfo, kill.
+- Danh sách syscall: write, read, exit, yield, getpid, ps, kill.
 
 #### Implementation
 - SVC handler assembly: save context → extract syscall number → call C dispatcher.
@@ -535,7 +535,7 @@ docs/tech_docs/
 - Blocking read: gọi sys_read() → process BLOCKED đến khi UART nhận ký tự →
   IRQ handler đánh thức → process READY → scheduler pick → read() return.
   Đây là demo đẹp nhất của BLOCKED state.
-- Commands: ps, meminfo, kill <pid>, crash (test fault isolation), help.
+- Commands: help, ps, kill `<pid>`, echo `<text>`, clear, crash (test fault isolation).
 - Mỗi command = 1 hoặc nhiều syscall. Shell parse string → gọi syscall → in kết quả.
 
 #### Implementation

@@ -37,6 +37,12 @@
     .global _start
 
 _start:
+    /* First instruction must decode as an ARM branch (0xEA......)
+     * so the BBB SPL's kernel-image sanity check accepts it. A
+     * relative `b` to _reset costs nothing and is harmless on QEMU. */
+    b       _reset
+
+_reset:
     /* 1. Mask interrupts ------------------------------------- */
     cpsid   if
 

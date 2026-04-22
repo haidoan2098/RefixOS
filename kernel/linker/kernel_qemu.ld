@@ -135,7 +135,7 @@ SECTIONS
         PROVIDE(_svc_stack_top = .);
     } > VIRT
 
-    /* Symbols for heap start (future kmalloc) */
+    /* Heap start marker — kept for tooling, no allocator wired. */
     PROVIDE(_heap_start = .);
 
     /* PA of _start — used as ELF e_entry so QEMU boots at PA

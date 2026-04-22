@@ -17,14 +17,18 @@
 #include <stdint.h>
 #include "exception.h"
 
-/* Syscall numbers (Tier 1 — chapter 07). Values fixed because
- * they are encoded into user binaries; do not renumber. */
+/* Syscall numbers — values fixed because they are encoded
+ * into user binaries; do not renumber. */
 #define SYS_WRITE       0
 #define SYS_GETPID      1
 #define SYS_YIELD       2
 #define SYS_EXIT        3
+#define SYS_READ        4
+#define SYS_PS          5
+#define SYS_KILL        6
+#define SYS_TICKS       7
 
-#define NR_SYSCALLS     4
+#define NR_SYSCALLS     8
 
 /* Called from handle_svc with the preempted user context. Reads
  * r7 for the syscall number and r0..r3 for arguments, writes the

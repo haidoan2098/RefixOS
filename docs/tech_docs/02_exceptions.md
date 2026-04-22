@@ -377,7 +377,7 @@ void exception_init(void) {
 
 ## Testing
 
-Không thể test hết 7 exception ngay ở Phase 2 — nhiều cái cần MMU/timer để trigger.
+Không thể test hết 7 exception ngay tại bước này — nhiều cái cần MMU/timer để trigger.
 Test 3 loại đại diện đủ bao phủ các cơ chế then chốt.
 
 | Test | Cách trigger | Bao phủ cơ chế | Kết quả |
@@ -397,8 +397,8 @@ Sau khi có MMU (Chapter 03), có thể test bằng cách đọc vùng VA không
 
 3 test đủ vì **mọi entry stub chia sẻ cùng pattern**: Data Abort chứng minh LR adjust +
 fatal path + fault register access, Undefined chứng minh mode switch, SVC chứng minh
-return path. Prefetch Abort và IRQ dùng y hệt pattern — tự động được verify khi Phase 3/4
-dùng thật.
+return path. Prefetch Abort và IRQ dùng y hệt pattern — tự động được verify khi MMU và
+timer chạy thật.
 
 ---
 

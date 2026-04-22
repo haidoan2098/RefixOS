@@ -48,3 +48,26 @@ void ulib_tag(void)
     ulib_putu((unsigned int)sys_getpid());
     ulib_puts("] ");
 }
+
+int ulib_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+int ulib_strncmp(const char *a, const char *b, unsigned int n)
+{
+    while (n && *a && *a == *b) { a++; b++; n--; }
+    if (n == 0) return 0;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+int ulib_atoi(const char *s)
+{
+    int v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    return v;
+}
