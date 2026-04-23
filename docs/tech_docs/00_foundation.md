@@ -1,4 +1,437 @@
-# Chapter 00 — Foundation: Từ C đến silicon
+# Chapter 00 — Foundation: From C to silicon
+
+
+
+<a id="english"></a>
+
+**English** · [Tiếng Việt](#tiếng-việt)
+
+> You write C and know what an OS is at a conceptual level. But you haven't seen how C
+> actually runs on hardware, you can't read assembly, and you don't know how the CPU
+> operates at the register level. This chapter fills exactly those gaps — just enough
+> to follow the next 10 chapters.
+>
+> Every section connects directly to a later chapter. Nothing here is trivia.
+
+---
+
+## 1. C doesn't run on its own
+
+When you write:
+
+```c
+int x = 5;
+int y = x + 3;
+```
+
+What do you think happens? The computer "understands" C and runs it?
+
+No. The CPU has no idea what C is. It doesn't know what `int` is, what `+` is, what a
+variable is. The CPU only does one thing: **fetch an instruction from memory, decode,
+execute**. Repeat. Forever.
+
+An instruction is machine code — a sequence of numbers the CPU understands. Each
+instruction does exactly one simple thing: copy a number into a register, add two
+registers, read one memory cell. That's it.
+
+The compiler (gcc, clang) translates C into instructions. The code above, compiled for
+ARM, becomes something like:
+
+```
+mov   r0, #5        ← place the number 5 into register r0
+add   r1, r0, #3    ← r1 = r0 + 3 = 8
+```
+
+That's all. No magic. `int x = 5` is just "place the number 5 into a cell inside the CPU".
+
+### Registers — memory cells inside the CPU
+
+A register is the smallest, fastest memory — sitting inside the CPU, accessed in one
+clock cycle. ARM has 16 main registers (r0–r15), each holding 32 bits (4 bytes).
+
+The CPU performs every operation **on registers**, not on RAM. To compute `a + b` when
+a and b live in RAM:
+
+```
+                    RAM                         CPU
+              ┌─────────────┐            ┌──────────────┐
+              │ a = 5       │──load──▶   │ r0 = 5       │
+              │ b = 3       │──load──▶   │ r1 = 3       │
+              │             │            │ add r2,r0,r1  │
+              │ c = ?       │◀──store──  │ r2 = 8       │
+              └─────────────┘            └──────────────┘
+```
+
+Three steps: load a into r0, load b into r1, add, store the result back into RAM.
+**Every** C operation has to go through this.
+
+### Why this matters
+
+On Linux, when you write C, the compiler + OS + runtime handles everything underneath.
+You never need to know about registers, instructions, or memory layout.
+
+But on bare-metal — no OS, no runtime. **You have to build the environment that C needs
+to run.** That's the first thing the kernel has to do (→ Chapter 01).
+
+---
+
+## 2. Reading ARM assembly — just enough to follow the code
+
+Section 1 said C compiles to instructions. But when reading kernel code, you'll meet
+real assembly — not pseudocode. This section teaches you to read ARM assembly at the
+level **required to understand `start.S` and the asm snippets in the project**, not
+how to write it.
+
+### The general pattern
+
+Most ARM instructions look like this:
+
+```
+opcode   destination, source1, source2
+```
+
+Examples:
+
+```asm
+add   r2, r0, r1      @ r2 = r0 + r1
+sub   r3, r3, #1       @ r3 = r3 - 1
+mov   r0, #5           @ r0 = 5
+```
+
+- `r0`, `r1`, ... `r12` — general-purpose registers (introduced in Section 1)
+- `#5` — immediate value. The `#` means "literal number", not a register
+- `@` — comment in ARM assembly (like `//` in C)
+
+### Reading/writing memory
+
+```asm
+ldr   r0, [r1]         @ r0 = *r1          (load: read from memory)
+str   r0, [r1]         @ *r1 = r0          (store: write to memory)
+ldr   r0, [r1, #4]     @ r0 = *(r1 + 4)   (offset of 4 bytes)
+str   r0, [r1], #4     @ *r1 = r0; r1 += 4 (post-increment)
+```
+
+`[r1]` = the address in r1, equivalent to `*ptr` in C.
+`[r1, #4]` = address r1 + 4, equivalent to `*(ptr + 1)` for `uint32_t *ptr`.
+
+`ldr r0, =_bss_start` — a special form: load the **address** of symbol `_bss_start`
+into r0. Equivalent to `r0 = &_bss_start` in C.
+
+### Branches
+
+```asm
+b     label            @ jump to label (goto)
+bl    kmain            @ jump to kmain, save the return address into LR
+bx    lr               @ jump to the address in LR (return)
+blo   label            @ jump if previous cmp result was "lower" (unsigned <)
+```
+
+`bl` = branch and link — **calling a function** in assembly. Like `kmain()` in C, except
+the CPU also saves the return address (into LR).
+
+### Compare and conditional execution
+
+```asm
+cmp   r0, r1           @ compare r0 with r1 (set flags, no result stored)
+strlo r2, [r0], #4     @ store ONLY IF r0 < r1 (lo = lower, unsigned)
+```
+
+ARM lets you **attach a condition to an instruction**: `strlo` = `str` + `lo` (only
+executes if the "lower" condition is true). This is how ARM writes loops without `if`.
+
+### Special instructions you'll see in the project
+
+| Instruction | Meaning | Seen in |
+|-------------|----------|-------|
+| `cpsid if` | Disable IRQ and FIQ | Chapter 01: first line of `start.S` |
+| `cps #0x13` | Switch CPU to SVC mode | Chapter 01: stack setup |
+| `mrs r0, cpsr` | Read CPSR into r0 | Chapter 01: `kmain` reads the mode |
+| `msr cpsr, r0` | Write r0 into CPSR | Chapter 02, 05: change mode |
+| `mcr p15, ...` | Write to coprocessor CP15 (MMU, cache) | Chapter 02: set VBAR, Chapter 03: enable MMU |
+| `stmia r0, {r0-r12}` | Store multiple consecutive registers to memory | Chapter 05: context switch |
+| `ldmia r0, {r0-r12}` | Load multiple registers from memory | Chapter 05: context switch |
+| `svc #0` | Supervisor Call (syscall) | Chapter 07: user → kernel |
+
+No need to memorize this. When you meet one in a later chapter, come back and look it up.
+
+---
+
+## 3. Function call = stack manipulation
+
+> This section is for readers who don't yet know how the stack works at the hardware
+> level. If you already understand stack frames, SP, and LR — skip ahead to Section 4.
+
+When C calls a function:
+
+```c
+int result = add(5, 3);
+```
+
+What actually happens? The CPU runs instructions sequentially — how does it "jump" into
+`add`, run it, and come back to exactly the right spot?
+
+### Problem 1: Return to where?
+
+The CPU has a special register called **PC** (Program Counter) — it holds the address
+of the next instruction. The CPU runs the instruction at PC, then PC increments. Linear.
+
+When calling a function, the CPU needs to:
+1. **Remember** the return address (the instruction right after the call)
+2. **Jump** PC to the start of the function
+3. When the function finishes, **restore** PC to the remembered address
+
+ARM uses the **LR** register (Link Register, r14) to hold the return address:
+
+```
+bl  add       ← "branch and link": save next-instruction address into LR, jump to add
+              ← when add finishes, it runs "bx lr" = jump to the address in LR
+```
+
+### Problem 2: What about nested calls?
+
+`main` calls `foo`, `foo` calls `bar`. When `foo` calls `bar`, LR gets overwritten — the
+address to return to `main` is lost. We need a place to store many return addresses, in
+order.
+
+That's why the stack exists.
+
+### Stack — a pile of plates
+
+The stack is a region of RAM the CPU uses like a pile of plates: **put on top, take from
+the top** (Last In, First Out).
+
+Register **SP** (Stack Pointer, r13) points to the top of the stack. For each function call:
+
+```
+Calling foo():                          foo() returns:
+┌───────────────┐                       ┌───────────────┐
+│               │ ◀── SP (new top)     │               │
+│  old LR      │     push LR           │               │ ◀── SP (back to old)
+│  locals       │     reserve space    │               │     pop, freed
+├───────────────┤                       ├───────────────┤
+│  ... caller   │                       │  ... caller   │
+└───────────────┘                       └───────────────┘
+     ▲ stack grows downward                 ▲ stack shrinks
+```
+
+Each function call **pushes** a frame (stack frame) onto the stack: LR (return address),
+local variables, arguments. On return, it **pops** the frame — SP goes back to where it
+was, the plate is removed.
+
+You can nest calls as deep as you want — each level pushes a frame, return pops it back.
+
+### What if there's no stack?
+
+The C compiler **assumes** the stack already exists. Every function call emits push/pop
+instructions on SP. If SP isn't set, or points to invalid memory:
+
+- The first push writes to a garbage address → **overwrites random data** or **crashes**
+- Function return reads LR from a garbage address → jumps to a random instruction → crash
+
+No clear symptom. No error message. Just wrong behavior or a hang.
+
+On Linux, the OS creates a stack for each program before running it. On bare-metal —
+**nobody does that for you**. The first job of boot code is to set SP to a valid RAM
+region (→ Chapter 01, `start.S` first line after masking IRQs).
+
+---
+
+## 4. Memory is just a bus address
+
+When C writes:
+
+```c
+*ptr = 42;
+```
+
+The CPU puts the address on the **memory bus**, together with the data (42) and a
+"write" signal. Whatever sits at that address receives the data.
+
+The CPU **does not know and does not care** what's at that address.
+
+### Same instruction, different address = completely different effect
+
+```
+Write to 0x80000000 → writes to RAM     → stores data normally
+Write to 0x44E09000 → writes to UART    → sends a character out the serial port
+Write to 0x48040000 → writes to Timer   → configures the timer hardware
+```
+
+All three are `str r0, [r1]` (store register into address). The CPU can't tell the
+difference. What differs is **what sits at that address** — a RAM chip or a hardware
+controller.
+
+```
+         CPU
+          │
+          │  address + data
+          ▼
+    ┌─────────────┐
+    │  Memory Bus  │
+    └──┬──────┬───┘
+       │      │
+       ▼      ▼
+    ┌─────┐ ┌──────┐
+    │ RAM │ │ UART │  ← same bus, different address range
+    └─────┘ └──────┘
+```
+
+Accessing hardware via memory addresses is called **MMIO** (Memory-Mapped I/O).
+On ARM, almost all hardware uses MMIO — there are no special I/O instructions.
+
+### Consequence for a kernel developer
+
+Controlling hardware = **read/write the right address, the right value, in the right
+order**. No API, no library needed. You only need to know:
+
+- Which address (look it up in the datasheet/TRM)
+- What value to write (look up the register description)
+- What order (some hardware requires writing register A before B)
+
+For example, sending the character 'A' out the UART on BeagleBone Black:
+
+```c
+/* UART0 transmit register is at address 0x44E09000 + 0x00 */
+*((volatile uint32_t *)0x44E09000) = 'A';
+```
+
+One line of C. No driver framework, no HAL. This is the essence of bare-metal
+(→ Chapter 01, UART driver).
+
+### Why `volatile`?
+
+The compiler is clever — it optimizes code. If it sees you write to an address without
+reading it back, it may drop the write ("dead store elimination"). For RAM, that's fine.
+For a hardware register — **disaster**: you want to send a character out UART and the
+compiler deletes the write.
+
+`volatile` tells the compiler: "this address has side effects — don't optimize, don't
+drop, don't reorder".
+
+---
+
+## 5. CPU modes and privilege
+
+If all code could access any address, then any program could:
+- Overwrite the kernel → crash the whole system
+- Disable interrupts → nobody can stop it
+- Read another program's data → break security
+
+The CPU needs a way to distinguish **trusted code** from **untrusted code**.
+
+### ARM solves this with CPU modes
+
+ARM has several modes, each with a different privilege level:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Privileged modes                       │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
+│  │   SVC    │ │   IRQ    │ │   ABT    │ │   UND    │   │
+│  │ Kernel   │ │ Interrupt│ │  Fault   │ │ Unknown  │   │
+│  │ runs here│ │ handler  │ │ handler  │ │ handler  │   │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │
+│  ┌──────────┐                                            │
+│  │   FIQ    │  ← fast interrupt, high priority          │
+│  └──────────┘                                            │
+├─────────────────────────────────────────────────────────┤
+│                   Unprivileged mode                       │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │                   User mode                       │   │
+│  │  Processes run here — cannot disable interrupts,  │   │
+│  │  cannot access kernel memory, cannot touch        │   │
+│  │  hardware registers.                              │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **User mode:** least privileged. User programs run here. No hardware access, no
+  disabling interrupts, no touching the page table.
+- **SVC mode (Supervisor):** full privilege. The kernel runs here.
+- **IRQ/FIQ mode:** CPU **automatically** switches here when receiving a hardware
+  interrupt.
+- **ABT mode (Abort):** CPU auto-switches on an invalid memory access (Data Abort,
+  Prefetch Abort).
+- **UND mode (Undefined):** CPU auto-switches on an unrecognized instruction.
+
+### Banked registers — each mode has its own SP
+
+This is an important detail: when the CPU changes mode, **some registers automatically
+swap to a mode-specific copy**. At minimum SP (stack pointer); some modes also have
+their own LR.
+
+```
+                User mode         IRQ mode          SVC mode
+              ┌───────────┐    ┌───────────┐    ┌───────────┐
+  r0 – r12    │  shared   │    │  shared   │    │  shared   │
+              ├───────────┤    ├───────────┤    ├───────────┤
+  SP (r13)    │ SP_usr    │    │ SP_irq    │    │ SP_svc    │  ← different!
+  LR (r14)    │ LR_usr    │    │ LR_irq    │    │ LR_svc    │  ← different!
+              └───────────┘    └───────────┘    └───────────┘
+```
+
+So: when an interrupt fires, the CPU switches to IRQ mode and SP **automatically** becomes
+SP_irq — a completely different stack pointer. The code that was running on the User stack
+is not affected.
+
+This is why boot code must **set up a dedicated SP for each mode** (→ Chapter 01,
+`start.S`: switch to FIQ mode → set SP, switch to IRQ mode → set SP, ...).
+
+### The CPU switches modes automatically
+
+Code never "asks" to switch mode. **Hardware forces it**:
+
+```mermaid
+flowchart LR
+    A["User mode<br/>(process running)"] -->|"Timer interrupt"| B["IRQ mode<br/>(CPU auto-switches)"]
+    A -->|"Invalid memory access"| C["ABT mode<br/>(CPU auto-switches)"]
+    A -->|"SVC instruction"| D["SVC mode<br/>(CPU auto-switches)"]
+    A -->|"Unknown instruction"| E["UND mode<br/>(CPU auto-switches)"]
+```
+
+This event is called an **exception**. Each kind of exception drops the CPU into the
+matching mode. A user program cannot elevate its own privilege — only an exception can
+change the mode. This is the foundation of the entire system's security.
+
+The exception mechanism is explained in detail in → Chapter 02.
+
+### CPSR — the CPU knows its current mode
+
+The CPU stores its current mode in the **CPSR** register (Current Program Status Register).
+You don't need to memorize the full layout — just know that CPSR holds three important
+things:
+
+- **MODE bits [4:0]** — current mode (0x13 = SVC, 0x12 = IRQ, 0x10 = User, ...)
+- **I bit [7]** — if 1, IRQ is masked (CPU ignores interrupts)
+- **F bit [6]** — if 1, FIQ is masked
+
+Boot code starts with `cpsid if` — sets I=1, F=1 — **masking all interrupts** before
+doing anything else (→ Chapter 01, first line of `start.S`).
+
+The remaining CPSR bit fields will be explained in later chapters as needed.
+
+---
+
+## Links
+
+This chapter has no code. It provides the mental model needed to read the next 10 chapters:
+
+| Concept | Section | Used in chapter |
+|------------|------|----------------|
+| Instructions, registers | 1 | 01 (boot assembly), 02 (exception handler) |
+| ARM assembly syntax | 2 | 01 (`start.S`), 02 (handler asm), 05 (context switch) |
+| Stack, SP, function calls | 3 | 01 (stack setup), 05 (context switch) |
+| Memory bus, MMIO, volatile | 4 | 01 (UART driver), 04 (timer/INTC driver) |
+| CPU modes, privilege, banked SP | 5 | 01 (mode switching), 02 (exception), 05 (User vs SVC), 07 (syscall) |
+| CPSR, IRQ masking | 5 | 01 (cpsid), 04 (interrupt enable), 06 (scheduler atomic) |
+
+**Next: Chapter 01 — Boot: From power-on to UART output →**
+
+---
+
+<a id="tiếng-việt"></a>
+
+**Tiếng Việt** · [English](#english)
 
 > Bạn viết C, biết OS là gì ở mức khái niệm. Nhưng bạn chưa biết C thật sự chạy thế nào
 > trên hardware, chưa đọc được assembly, chưa biết CPU hoạt động ở mức register.

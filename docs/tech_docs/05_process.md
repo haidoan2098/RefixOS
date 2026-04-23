@@ -1,4 +1,612 @@
-# Chapter 04 — Process: Dựng khung cho nhiều chương trình
+# Chapter 05 — Process: The foundation for running multiple programs
+
+<a id="english"></a>
+
+**English** · [Tiếng Việt](#tiếng-việt)
+
+> The timer interrupt fires every 10 ms and the kernel hears the beat. But
+> hearing it isn't useful if there's no one to "pick the next runner" — because
+> the concept of *a program* doesn't exist yet. This chapter doesn't make
+> processes run — it **builds the scaffold**: a struct describing one process,
+> a private page table per process, and a stack ready for the first context
+> switch. When it's done, the kernel knows about 3 processes, has allocated
+> enough resources for them, but the CPU hasn't been handed over to anyone
+> yet — the next chapter (Context Switch + Scheduler) flips the switch.
+
+---
+
+## What we have so far
+
+Modules marked ★ are **new in this chapter**.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    User space                        │
+│                                                      │
+│   ┌──────────┐   ┌──────────┐   ┌──────────┐         │
+│   │ Proc 0   │   │ Proc 1   │   │ Proc 2   │         │
+│   │ counter  │   │ runaway  │   │ shell    │  ← stub │
+│   │ VA 0x40M │   │ VA 0x40M │   │ VA 0x40M │         │
+│   │ PA+0x200k│   │ PA+0x300k│   │ PA+0x400k│         │
+│   └──────────┘   └──────────┘   └──────────┘         │
+│     (data is in RAM, no one running yet)             │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────────────────────────────────────┐
+│                   Kernel (SVC mode)                  │
+│                                                      │
+│   ┌──────────────────────────────────────┐           │
+│   │  ★ processes[3]  (PCB table)         │           │
+│   │    pid · state · ctx · pgd · kstack  │           │
+│   └───────┬─────────────┬────────────────┘           │
+│           │             │                             │
+│   ┌───────▼────┐  ┌─────▼──────┐                     │
+│   │ ★ proc_pgd │  │ ★ proc_    │                     │
+│   │ [3][4096]  │  │   kstack   │                     │
+│   │ 3 × 16 KB  │  │ [3][8 KB]  │                     │
+│   └────────────┘  └────────────┘                     │
+│                                                      │
+│   ┌────────────┐   ┌───────────────────────┐         │
+│   │ IRQ · Timer│   │  Exception · MMU · UART│        │
+│   └────────────┘   └───────────────────────┘         │
+│                                                      │
+│   TTBR0 still = boot_pgd · CPU still running kmain   │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                      Hardware
+              CPU · RAM · UART · INTC · Timer
+```
+
+**Updated boot flow:**
+
+```mermaid
+flowchart LR
+    A[Reset] --> B[start.S]
+    B --> C[kmain]
+    C --> D[uart_init]
+    D --> E[mmu_init]
+    E --> F[exception_init]
+    F --> G[irq_init + timer_init<br/>irq_register + irq_enable]
+    G --> H["★ process_init_all<br/>(3 PCB, 3 PGD,<br/>copy user binaries)"]
+    H --> DI[mmu_drop_identity]
+    DI --> SH[timer_set_handler<br/>= scheduler_tick]
+    SH --> PFR["process_first_run<br/>(rfefd → USR,<br/>CPSR.I=0 atomic)"]
+
+    style H fill:#ffe699,stroke:#e8a700,color:#000
+```
+
+What's new: once the IRQ machinery is running, the kernel builds 3 static PCBs
+— each has its own L1 table, its own kernel stack, and its own 1 MB user
+memory (holding a copy of user_stub). TTBR0 is **not** swapped — boot_pgd is
+still active; `current` is only a debug pointer. Only the next chapter actually
+moves the CPU into a process.
+
+---
+
+## Principles
+
+### The CPU has no idea what a "process" is
+
+To the CPU, at any moment there is only one register set and one PC. It
+doesn't know about "programs" — it only reads the instruction at PC, decodes,
+executes. "Process" is a concept **invented by software**. To create the
+illusion of multiple programs running at once, the kernel saves the CPU state
+of each program into its own struct and swaps: save the current registers
+into struct A, load registers from struct B → from here on, the CPU runs as
+if it were B all along.
+
+That state-carrying struct is called the **PCB (Process Control Block)**.
+The swap operation is called a **context switch**. This chapter builds the
+PCB; the context switch is in the next chapter.
+
+### What a process needs
+
+For the CPU to actually "be" process A, the kernel has to prepare 4 things:
+
+1. **A CPU state snapshot** — r0–r12, SP, PC, CPSR, SPSR. On switch-in, load
+   these registers exactly.
+2. **An address space** — its own page table. A's user memory ≠ B's; both
+   see the same kernel memory. This is the foundation of isolation.
+3. **A kernel stack** — when A enters the kernel (via syscall or IRQ), the
+   kernel runs C functions on a stack. That stack must belong to A, not be
+   shared with other processes — see the Design section for why.
+4. **User memory** — where A's code + data + stack live when it runs in user
+   mode.
+
+Missing any of these four and the process either can't run, or runs but
+unsafely (corrupt stacks, leaked kernel data).
+
+### Why "per-process" instead of sharing
+
+**Per-process page table** means each process has its own VA→PA mapping. The
+kernel changes the table on switch → process A can't see B's memory, not
+because "it's forbidden" but because in A's map there's simply **no entry**
+pointing at B's region. That's how Linux/Windows isolate processes.
+
+The alternative some small kernels use is a **single shared page table**:
+each process gets a different VA range in the same table. Convenient — no
+TTBR0 swap, no TLB flush. But isolation disappears: A still has a VA entry
+for B's region inside the same table; it's just "shouldn't be touched". A
+buggy line of code and you corrupt each other.
+
+RingNova picks **per-process page table** — following the project spec: "MMU
+isolation is real". The cost: each switch writes TTBR0 and flushes the TLB.
+
+---
+
+## Context
+
+```
+Kernel state at the start of this chapter:
+- MMU       : ON, boot_pgd active (identity RAM + high-VA + peripherals)
+- IRQ       : ON, CPSR.I = 0, timer tick every 10 ms (tick_count rising)
+- SVC stack : one stack shared across the whole kernel, _svc_stack_top (8 KB)
+- "current" : doesn't exist yet — kmain runs directly
+- PCB       : no struct, no notion of pid
+```
+
+The kernel has all the "lower-layer" pieces: it can read hardware, catch
+faults, listen to interrupts. Nothing at the upper layer yet — the kernel is
+still a single-threaded program.
+
+---
+
+## The problem
+
+1. **No struct for multi-program state** — the CPU has one register set, one
+   PC. To remember "3 programs" we need 3 snapshots. No struct exists for
+   that.
+
+2. **No private address spaces** — all code currently shares boot_pgd. There
+   is no sense in which "process A lives here" beyond the VA its own code
+   picks.
+
+3. **No private kernel stacks** — without them, if A enters the kernel via
+   syscall, is then preempted by a timer that switches to B, and B enters
+   the kernel too, both would write to the same stack and corrupt each
+   other. A per-process stack is needed from day one.
+
+4. **No user memory** — the stub code and user stack for each process must
+   be laid down before anything runs. The kernel must know which PA holds
+   A's code and which user VA maps to it.
+
+5. **"Not running" doesn't mean "no need to build"** — a common misconception
+   is "set up when we need to run it". In practice, all infrastructure must
+   be ready before the switch is flipped. Otherwise the context-switch
+   chapter has to write tricky assembly **and** build data **and** debug
+   both at once. Too risky.
+
+This chapter solves 1–4 so the context-switch chapter only has to write the
+assembly, with the data already in place.
+
+---
+
+## Design
+
+### 3 static processes, no dynamic allocation
+
+RingNova fixes `NUM_PROCESSES = 3` at compile time. No `process_create()`,
+no fork, no allocator. PCBs live in the static array `processes[3]`, page
+tables in `proc_pgd[3][4096]`, kernel stacks in `proc_kstack[3][8192]` —
+everything in `.bss`.
+
+Upsides:
+
+- No allocator to implement
+- Memory footprint known exactly at compile time
+- Debugging is easy: PCB/PGD/stack addresses don't change between boots
+
+Downsides (accepted): can't load external binaries, can't spawn new
+processes. That's fine for the 3-process demo — that's also the project
+scope.
+
+### PCB layout: `ctx` goes first
+
+```c
+typedef struct {
+    uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
+    uint32_t r8, r9, r10, r11, r12;
+    uint32_t sp_svc;    /* kernel SP — points at the initial frame */
+    uint32_t lr_svc;
+    uint32_t spsr;      /* CPSR snapshot to restore on return to user */
+    uint32_t sp_usr;    /* banked USR-mode SP                          */
+    uint32_t lr_usr;
+} proc_context_t;
+
+typedef struct process {
+    proc_context_t ctx;                   /* offset 0 — asm-friendly */
+    uint32_t       pid;
+    task_state_t   state;
+    const char    *name;
+    uint32_t      *pgd;                   /* VA of the L1 table  */
+    uint32_t       pgd_pa;                /* PA — for TTBR0      */
+    void          *kstack_base;
+    uint32_t       kstack_size;
+    uint32_t       user_entry;
+    uint32_t       user_stack_top;
+    uint32_t       user_phys_base;
+} process_t;
+```
+
+Important detail: `ctx` sits at **offset 0**. The future context-switch
+assembly only needs a pointer to the PCB (already held in `current`) to
+access the context directly, without `+offset`. Tiny detail, but it shaves
+one instruction off every switch.
+
+`sp_svc` and `sp_usr` are separate because ARMv7-A has **banked SPs** —
+each mode has its own physical SP register. In the kernel, the CPU uses
+`sp_svc`; returning to user mode it switches to `sp_usr`. The PCB has to
+remember both.
+
+### Physical memory layout — one slot per process
+
+```
+RAM_BASE + 0x000000  ┌──────────────────────────────┐
+                     │  Kernel image (text+bss)     │
+RAM_BASE + 0x104000  ├──────────────────────────────┤
+                     │  boot_pgd          (16 KB)   │
+RAM_BASE + 0x108000  ├──────────────────────────────┤
+                     │  ★ proc_pgd[0]     (16 KB)   │
+RAM_BASE + 0x10C000  │  ★ proc_pgd[1]     (16 KB)   │
+RAM_BASE + 0x110000  │  ★ proc_pgd[2]     (16 KB)   │
+                     ├──────────────────────────────┤
+                     │  Exception stacks + other BSS │
+                     │  ★ proc_kstack[0..2] (3×8 KB) │
+                     │  ★ processes[3]               │
+                     │  SVC/IRQ/ABT/UND/FIQ stacks  │
+RAM_BASE + 0x200000  ├──────────────────────────────┤
+                     │  ★ Process 0 user memory 1MB │  ← user_stub copy
+RAM_BASE + 0x300000  ├──────────────────────────────┤
+                     │  ★ Process 1 user memory 1MB │
+RAM_BASE + 0x400000  ├──────────────────────────────┤
+                     │  ★ Process 2 user memory 1MB │
+RAM_BASE + 0x500000  └──────────────────────────────┘
+```
+
+Each process has **1 MB of private PA** for user memory. Three separate
+slots — a bug in process A can't reach B's physical slot, let alone through
+the MMU. That's why the project diagram cares about PA-level isolation vs
+VA-level isolation.
+
+Per-process kernel stacks are placed by the linker in BSS — their exact PA
+depends on layout, not the `+0x117000` figure the memory-architecture doc
+suggests. What matters is that each stack sits in the kernel region
+(high-half), 8 KB each, 8-byte aligned — all satisfied. The `kstack_base`
+field in the PCB holds the actual address the linker computed.
+
+### One page table per process — but what's the same?
+
+All 3 processes share the same kernel (same code, same static data, same
+peripheral registers). Only the user region differs. So `proc_pgd[i]` is
+built by **copying** the entries of boot_pgd, skipping the identity RAM
+range, then installing exactly one user entry:
+
+```
+boot_pgd               proc_pgd[0]            proc_pgd[1]            proc_pgd[2]
+─────────              ─────────              ─────────              ─────────
+[0x000] FAULT    →     [0x000] FAULT          [0x000] FAULT          [0x000] FAULT
+                                            (NULL guard for all 3)
+[0x400] none     →     [0x400] → PA+0x200k   [0x400] → PA+0x300k    [0x400] → PA+0x400k
+                                            (user VA, DIFFERENT)
+[0x700] → RAM          [0x700] skip          [0x700] skip           [0x700] skip
+(identity RAM, skip)                        (drop identity: no
+                                             proc needs to reach
+                                             kernel PA by subtraction)
+[0xC00] → RAM    →     [0xC00] → RAM         [0xC00] → RAM          [0xC00] → RAM
+(kernel high-VA)                            (kernel mirror, SAME)
+[0x100] peripheral →   [0x100] peripheral    [0x100] peripheral     [0x100] peripheral
+(QEMU peri) or                              (SAME)
+[0x44E] (BBB peri)
+```
+
+The result:
+
+- **NULL guard** preserved → every process Data Aborts on NULL deref
+- **User section** (`0x40000000`): 3 processes point to 3 different PAs →
+  real isolation
+- **Kernel high-VA** (`0xC0000000`): same PA, same permissions → the kernel
+  can always reach itself
+- **Peripherals**: same — every process's syscalls see the same UART/timer
+- **Identity RAM**: dropped → when context_switch swaps TTBR0 to
+  `proc_pgd[i]`, the CPU loses access to the kernel's PA through identity.
+  That's fine: the kernel has already trampolined PC into high-VA at boot
+  (`ldr pc, =_start_va` in `start.S` right after `mmu_enable` — see chapter
+  03), so PC is in `0xC0...`, and that entry exists in both `boot_pgd` and
+  every `proc_pgd[i]`. Swapping TTBR0 doesn't need another trampoline.
+
+### Inline user stub — 3 physical copies
+
+The code the processes will eventually run is **embedded in the kernel
+image** as a `.user_stub` section:
+
+```asm
+.section .user_stub, "ax"
+user_stub_start:
+    mov     r0, #1
+1:  b       1b
+user_stub_end:
+```
+
+A short instruction sequence (does nothing useful — the process isn't
+running yet). `process_init_all` uses `memcpy` to write those bytes to 3
+different PAs (PA+0x200000, PA+0x300000, PA+0x400000).
+
+Why copy instead of sharing one original? If all 3 processes pointed
+`pgd[0x400]` at the same PA, then physically there would be **no isolation**
+— one chunk of RAM holds the code, and one process self-patching would
+affect the other two. A separate copy per process = real physical isolation
+at the byte level. Every instruction has its own RAM address.
+
+Later, when syscalls exist, all 3 processes execute the same logic (because
+the copies are byte-for-byte identical), but they can **modify their own
+code** without affecting the others — the correct model for a real OS.
+
+### Initial kernel stack frame — built now, used later
+
+When the context-switch chapter is written, the logic for resuming a
+process will be:
+
+```
+msr   spsr_cxsf, <ctx.spsr>          @ load SPSR
+mov   sp, <ctx.sp_svc>               @ point SP at the initial frame
+ldmfd sp!, {r0-r12, pc}^             @ atomic pop of 14 words, SPSR → CPSR
+```
+
+The `ldmfd` with the trailing `^` flag: pops r0–r12 + PC **and** copies
+SPSR into CPSR in the same instruction. That's how ARM returns from an
+exception atomically — it changes both PC and mode bits in one shot.
+
+For that instruction to work, 14 words must already be on the kernel stack
+in ascending pop order:
+
+```
+low addr  ┌──────────────┐ ← ctx.sp_svc (SP to pop from)
+          │ r0  = 0      │ [+0x00]
+          │ r1  = 0      │ [+0x04]
+          │ ...          │
+          │ r12 = 0      │ [+0x30]
+          │ pc  = 0x40M  │ [+0x34]  ← user_entry
+high addr └──────────────┘ ← kstack_base + 8 KB (stack top)
+```
+
+`process_init_all` builds this frame at setup time. The r0–r12 values are
+zero (the process starts with clean registers), pc = `USER_VIRT_BASE =
+0x40000000` (entry into the user stub), spsr = `0x10` (USR mode, IRQ+FIQ
+unmasked, ARM state), sp_usr = `0x40100000` (top of user stack).
+
+The next chapter needs only 3 instructions to turn the CPU into a running
+user-mode process. That's why the frame is built in advance: it takes risk
+out of the hard part (context-switch assembly).
+
+---
+
+## How it operates
+
+### The `process_init_all` flow
+
+```mermaid
+sequenceDiagram
+    participant KM as kmain
+    participant PI as process_init_all
+    participant MC as memcpy
+    participant PG as pgtable_build_for_proc
+    participant PCB as processes[i]
+
+    KM->>PI: after irq_init + per-line irq_enable
+    loop i = 0, 1, 2
+        PI->>PCB: zero, set pid/name/state=READY
+        PI->>PCB: pgd = proc_pgd[i]<br/>kstack = proc_kstack[i]<br/>user_pa = RAM+0x200000+i*0x100000
+        PI->>MC: memcpy(user_pa, user_stub_start, stub_size)
+        Note over MC: 3 physical copies
+        PI->>PG: pgtable_build_for_proc(pgd, user_pa)
+        PG->>PG: zero 4096 entries
+        PG->>PG: copy boot_pgd (skip identity RAM)
+        PG->>PG: pgd[0x400] = user_pa | PDE_USER_TEXT
+        PI->>PCB: build initial frame on kstack<br/>ctx.sp_svc / spsr / sp_usr
+    end
+    PI->>KM: current = &processes[0]
+```
+
+End state: 3 complete PCBs, 3 populated PGDs, 3 copies of the user_stub in
+RAM, `current` pointing at PCB 0. **TTBR0 is still unchanged** — boot_pgd
+is still doing the translation.
+
+### Two parallel maps — boot_pgd vs proc_pgd[i]
+
+```
+       boot_pgd (ACTIVE — TTBR0 points here, identity dropped after self-tests)
+       ┌────────────────────────────────────┐
+       │ 0x000: FAULT      (NULL guard)     │
+       │ 0x400: FAULT      (no user yet)    │
+       │ 0x700-0x77F: FAULT (dropped)       │  ← mmu_drop_identity cleared
+       │ 0xC00-0xC7F: high-VA alias RAM     │  ← kernel runs here
+       │ 0x100/0x1E0: peripherals           │
+       └────────────────────────────────────┘
+
+       proc_pgd[0]  (READY — not active yet)
+       ┌────────────────────────────────────┐
+       │ 0x000: FAULT                       │
+       │ 0x400: → RAM_BASE+0x200000 (user)  │  ★
+       │ 0x700-0x77F: FAULT (no identity)   │
+       │ 0xC00-0xC7F: high-VA (same)        │
+       │ 0x100/0x1E0: peripherals (same)    │
+       └────────────────────────────────────┘
+```
+
+Once `mmu_drop_identity()` has run, `boot_pgd` and `proc_pgd[i]` are **very
+similar** apart from entry `0x400` (the process-specific user section).
+That's the invariant that makes the context switch compact: swap TTBR0 to
+`proc_pgd[i]`, the kernel still runs through `0xC0...`, and user code at
+`0x40000000` now points at the new process's PA.
+
+---
+
+## Implementation
+
+### Files
+
+| File | Contents |
+|------|----------|
+| [kernel/include/proc.h](../../kernel/include/proc.h) | `process_t`, `proc_context_t`, `task_state_t`, API |
+| [kernel/proc/process.c](../../kernel/proc/process.c) | `processes[3]`, `proc_pgd[3]`, `proc_kstack[3]`, init logic |
+| [kernel/arch/arm/proc/user_stub.S](../../kernel/arch/arm/proc/user_stub.S) | Inline user stub (`.user_stub` section) |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Added `pgtable_build_for_proc` |
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Added `PDE_USER_TEXT`, new prototypes |
+| [kernel/include/platform.h](../../kernel/include/platform.h) | `USER_VIRT_BASE`, `NUM_PROCESSES`, `KSTACK_SIZE` (shared VA layout) |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | Per-board addresses + `USER_PHYS_BASE`, `USER_PHYS_STRIDE` |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | `.user_stub` section, input pattern `.bss.proc_pgd` aligned 16 KB |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | Same as kernel_qemu.ld |
+| [kernel/main.c](../../kernel/main.c) | Calls `process_init_all()`, tests T7/T8/T9 |
+
+### Key points
+
+**The linker keeps 16 KB alignment for every L1 table**:
+
+```ld
+.bss (NOLOAD) :
+{
+    . = ALIGN(16384);       /* boot_pgd */
+    *(.bss.pgd)
+    . = ALIGN(16384);       /* 3 × proc_pgd, aligned contiguous */
+    *(.bss.proc_pgd)
+    *(.bss*)
+    ...
+}
+```
+
+An L1 table has to be 16 KB aligned because TTBR0 requires it. With a
+`proc_pgd[3][4096]` array, each row is exactly 16 KB, so aligning once at
+the start is enough — the rest follow automatically.
+
+**`pgtable_build_for_proc` — a copy-from-boot strategy**:
+
+```c
+for (uint32_t i = 0; i < PGD_ENTRIES; i++) {
+    if (boot_pgd[i] == 0) continue;
+    if (i >= ident_lo && i < ident_hi) continue;  /* skip identity RAM */
+    pgd[i] = boot_pgd[i];
+}
+pgd[USER_VIRT_BASE >> 20] = (user_pa & 0xFFF00000U) | PDE_USER_TEXT;
+```
+
+We don't hard-code a list of peripherals per platform — we iterate boot_pgd
+and copy every non-zero entry (except the identity RAM). The result:
+peripherals, the kernel high-VA alias, high vectors (if any are added
+later) are all mirrored automatically. To change platform, just change
+`board.h` + `mmu.c`; process.c and pgtable.c don't move.
+
+**`PDE_USER_TEXT` — the correct attribute for user code**:
+
+```c
+#define PDE_USER_TEXT  (PDE_TYPE_SECTION | PDE_C | PDE_B \
+                        | PDE_AP_KERN_USER_RW | PDE_DOMAIN(0))
+```
+
+Cacheable, bufferable, kernel+user RW, **not** XN (execute-never) — the
+user section must be executable. Domain 0, like every other entry (DACR =
+client for domain 0, the AP bits carry the actual access rights).
+
+**Wired into kmain** (after IRQ setup):
+
+```c
+process_init_all();            /* ★ build 3 PCBs */
+
+mmu_drop_identity();           /* drop identity RAM PA→PA after copying binaries */
+
+timer_set_handler(scheduler_tick);   /* arm preemption — until now the
+                                      * timer only bumped tick_count,
+                                      * it didn't preempt */
+
+process_first_run(&processes[0]);    /* rfefd → USR, CPSR.I=0 atomic */
+```
+
+The order is not optional: `process_init_all` reads `boot_pgd` (available
+after `mmu_init`) and uses `uart_printf` (available after `uart_init`).
+Calling it before those dependencies either crashes the kernel or fails
+silently.
+
+---
+
+## Testing
+
+Three new tests added to `run_boot_tests`:
+
+| Test | Verifies | Failure means |
+|------|----------|---------------|
+| **T7** | PCB array: `pid == i`, `state == READY`, `pgd != NULL`, 16 KB aligned, correct `user_phys_base` offset | Init didn't run / field is wrong |
+| **T8** | Per-process L1 entry: `pgd[0]==0` (NULL guard), `pgd[0x400]` is a section with user-RW + the right PA, `pgd[0xC00] == boot_pgd[0xC00]` (kernel mirror), 3 distinct user PDEs | PGD build is wrong / PAs collide |
+| **T9** | Initial frame: r0–r12 = 0, frame `pc` = `USER_VIRT_BASE`, `ctx.spsr == 0x10`, `ctx.sp_usr == USER_STACK_TOP` | Stack frame doesn't match ldmfd format |
+
+**QEMU output:**
+
+```
+[PROC] pid=0 name=counter pgd=0xc0108000 kstack=0xc0114210 user_pa=0x70200000
+[PROC] pid=1 name=runaway pgd=0xc010c000 kstack=0xc0116210 user_pa=0x70300000
+[PROC] pid=2 name=shell   pgd=0xc0110000 kstack=0xc0118210 user_pa=0x70400000
+...
+[TEST] [PASS] T7 PCB array (3 processes)
+[TEST] [PASS] T8 L1 mappings (null+user+kern OK, 3 distinct user PAs)
+[TEST] [PASS] T9 initial stack frames (pc=USER_VIRT_BASE, spsr=0x10)
+[TEST] ========== 9 passed, 0 failed ==========
+```
+
+- `pgd` prints at **high-VA** (`0xc0108000`, `0xc010c000`, `0xc0110000`)
+  because the linker emits symbols at VA. The 16 KB alignment still holds
+  (the VA→PA offset is itself a multiple of 16 KB).
+- `pgd_pa` (not printed in the boot log but stored in the PCB) = `pgd -
+  PHYS_OFFSET` — that's the value TTBR0 will receive during a context
+  switch.
+- `user_pa` is still printed at PA: the user region uses PA for isolation;
+  it isn't linker-dependent.
+
+**Not tested yet (belongs to the next chapter):**
+
+- Whether a process actually runs — no context switch yet
+- Whether TTBR0 swap does its job — no swap yet
+- Whether an interrupt while in user mode restores context correctly —
+  user mode doesn't exist in this chapter's scope
+
+---
+
+## Links
+
+### Code files
+
+| File | Role |
+|------|------|
+| [kernel/include/proc.h](../../kernel/include/proc.h) | Public types + API |
+| [kernel/proc/process.c](../../kernel/proc/process.c) | Static init logic |
+| [kernel/arch/arm/proc/user_stub.S](../../kernel/arch/arm/proc/user_stub.S) | User stub source |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | `pgtable_build_for_proc` |
+| [kernel/main.c](../../kernel/main.c) | Wire-up + tests |
+
+### Dependencies
+
+- **Chapter 03 — MMU**: `boot_pgd` must be complete before
+  `pgtable_build_for_proc` copies entries from it; `PDE_*` attribute
+  macros are defined there
+- **Chapter 04 — Interrupts**: no direct dependency, but the next chapter
+  (Context Switch) will hook into the IRQ return path — the groundwork
+  has to be ready
+- **CLAUDE.md**: "No dynamic allocation — static only"; "Exception stacks
+  are only trampolines; kernel logic runs on per-process kernel stacks"
+
+### Next
+
+**Chapter 06 — Scheduler + Context Switch →** The PCBs are built but the
+CPU hasn't touched them. The next chapter writes `context_switch.S`: save
+prev's registers into `prev->ctx`, swap TTBR0 to `next->pgd_pa`, flush
+the TLB, restore registers from `next->ctx`, and atomically pop back into
+user mode. Because the kernel runs at high VA from boot, swapping TTBR0
+needs no trampoline — PC in `0xC0...` is shared across every PGD. Paired
+with a round-robin scheduler called from the timer IRQ, this is the first
+time 3 processes actually interleave on the terminal.
+
+---
+
+<a id="tiếng-việt"></a>
+
+**Tiếng Việt** · [English](#english)
 
 > Timer interrupt đã fire mỗi 10 ms, kernel đã nghe được nhịp. Nhưng nghe mà chưa có ai
 > để "chọn chạy tiếp" — vì chưa có khái niệm *chương trình*. Chapter này không làm cho

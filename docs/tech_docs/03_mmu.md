@@ -1,4 +1,475 @@
-# Chapter 03 — MMU: Tách kernel khỏi thế giới
+# Chapter 03 — MMU: Isolating the kernel from the world
+
+<a id="english"></a>
+
+**English** · [Tiếng Việt](#tiếng-việt)
+
+> Boot is done, exception handlers work. But every piece of code can see all of RAM — kernel,
+> drivers, data — all sitting exposed, no fence, no lock. One wrong line overwrites a UART
+> register, overwrites the page table, overwrites its own code — nobody stops it. This chapter
+> places a hardware layer between the CPU and RAM to control who sees what.
+
+---
+
+## What has been built so far
+
+Modules marked with ★ are **new in this chapter**; the rest already existed.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    User space                        │
+│                    (not yet)                         │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────────────────────────────────────┐
+│                   Kernel (SVC mode)                  │
+│                                                      │
+│   ┌────────────┐   ┌─────────────────────────┐       │
+│   │   kmain    │──▶│   Exception Handler     │       │
+│   │            │   │   vector table / stubs   │       │
+│   │            │   │   C handlers + dump      │       │
+│   └────────────┘   └─────────────────────────┘       │
+│          │                                           │
+│          ▼                                           │
+│   ┌──────────────────────────────────────────┐       │
+│   │  ★ MMU                                   │       │
+│   │    ├─ boot_pgd (L1 page table, 16 KB)    │       │
+│   │    ├─ identity map (kernel PA)            │       │
+│   │    ├─ high VA alias (0xC0000000)          │       │
+│   │    ├─ peripheral map (identity, SO+XN)    │       │
+│   │    └─ NULL guard (0x00000000 → FAULT)     │       │
+│   └──────────────────────────────────────────┘       │
+│          │                                           │
+│   ┌────────────┐   ┌─────────────────────────┐       │
+│   │   UART     │   │    Boot sequence        │       │
+│   │  driver    │   │    (start.S)            │       │
+│   └────────────┘   └─────────────────────────┘       │
+│                                                      │
+│           MMU: ★ ON   ·   IRQ: masked                │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                      Hardware
+              CPU · RAM · UART · (timer/INTC not yet used)
+```
+
+**Current boot flow — kernel linked at high VA `0xC0000000`:**
+
+```mermaid
+flowchart LR
+    A[Reset] --> B[start.S<br/>stacks@PA<br/>zero BSS]
+    B --> E["★ mmu_init phys_offset<br/>build pgd via PA<br/>enable MMU"]
+    E --> T["★ ldr pc, =_start_va<br/>trampoline PC<br/>→ high VA"]
+    T --> V[_start_va<br/>stacks@VA]
+    V --> C[kmain]
+    C --> D[uart_init]
+    D --> F[exception_init<br/>set VBAR]
+    F --> G["★ boot self-tests<br/>T1–T9"]
+    G --> D2["★ mmu_drop_identity<br/>remove PA range"]
+    D2 --> H[idle loop]
+
+    style E fill:#ffe699,stroke:#e8a700,color:#000
+    style T fill:#ffe699,stroke:#e8a700,color:#000
+    style G fill:#ffe699,stroke:#e8a700,color:#000
+    style D2 fill:#ffe699,stroke:#e8a700,color:#000
+```
+
+Key points of this design:
+
+1. **`mmu_init` is called before `uart_init`**. UART cannot work before MMU in this schema
+   because `uart_printf()` itself dereferences string literals at VA — VA is unmapped before MMU is on.
+   Solution: `mmu_init()` runs silently (no `uart_printf`), enables MMU, then kmain inits UART
+   and prints logs. MMU layout info is replayed by `mmu_print_status()` from kmain.
+2. **Trampoline `ldr pc, =_start_va`** jumps PC from PA (where `start.S` is running via identity map)
+   to high VA after MMU is on. From there every instruction fetch goes through the MMU.
+3. **`mmu_drop_identity()`** removes the identity PA mapping after self-tests. Stray PA derefs
+   afterwards will fault immediately — exposes bugs, no silent corruption.
+
+---
+
+## Principle
+
+### The CPU doesn't distinguish "whose memory"
+
+When C writes `*ptr = 42`, the CPU puts the address on the bus and writes 42. The CPU doesn't know
+and doesn't care whether that address belongs to the kernel, a UART register, or the page table itself.
+To the CPU, everything is just: **send address, receive/send data**.
+
+Consequence: without anything stopping it, **any code can access any address**. Kernel writes to
+0x10009000 (UART)? Fine. User program writes to 0x10009000? Also fine. User program overwrites
+kernel code? Still fine. No barrier exists.
+
+### Solution: place a filter between CPU and RAM
+
+Instead of letting the CPU talk directly to RAM, place a hardware component in between. Every time
+the CPU emits an address, that hardware:
+
+1. Receives the address from the CPU (called a **virtual address — VA**)
+2. Looks it up in a table in RAM (called a **page table**)
+3. If a valid entry is found → extracts the corresponding **physical address (PA)**, sends it on the bus
+4. If not found, or the entry says "forbidden" → **sends nothing**, instead triggers an exception (Data Abort)
+
+That hardware is called the **MMU** (Memory Management Unit). The page table lives in normal RAM,
+created and managed by the kernel. The MMU only reads the table, doesn't create it. **The kernel
+controls the table → the kernel decides who sees what.**
+
+### One table, full control
+
+The page table doesn't just translate VA→PA. Each entry also contains **access permissions**:
+
+- Kernel RW, user no-access → user program reads this region = Data Abort
+- Read-only → write to it = Data Abort
+- Execute Never (XN) → fetch instruction from here = Prefetch Abort
+
+The kernel doesn't need to "forbid" user programs in code. The kernel just needs to **not create an entry**
+for that region in the user's page table — from the user process's perspective, the kernel region **doesn't exist**.
+
+---
+
+## Context
+
+```
+CPU state just before mmu_init runs:
+- PC        : in start.S, after setting up SVC stack + zeroing BSS
+              (PC-relative, inside image at PA)
+- MMU       : OFF — every address the CPU emits is physical
+- IRQ/FIQ   : masked
+- SP        : SVC stack (temporarily at PA — enough for mmu_init)
+- Exception : VBAR not set → if crash, default vector @ 0 → hang
+- UART      : not initialized (uart_printf uses VA strings → can't use)
+```
+
+The kernel image is loaded at PA (`0x70100000` QEMU, `0x80000000` BBB) but **the linker emits
+symbols at high VA** (`0xC0100000` / `0xC0000000`). Before MMU is on:
+
+- CPU fetches instructions via PA (identity between LMA bytes and physical RAM).
+- Every `ldr rX, =sym` loads **VA** from the literal pool — dereferencing that VA will crash.
+
+That's why `start.S` must use PC-relative (`adr _start` + `sub PHYS_OFFSET`) to touch
+stack/BSS pre-MMU, and `mmu_init` must receive `phys_offset` as an argument to convert `boot_pgd`
+VA → PA before writing.
+
+---
+
+## Problem
+
+1. **No isolation** — any code can access any address. No user processes yet, but when Chapter 05
+   creates processes there's no way to prevent them from overwriting kernel memory.
+
+2. **NULL dereference doesn't fault** — `*(int*)0 = 1` on QEMU with MMU off will succeed
+   (address 0 is within the RAM range). NULL pointer bugs become silent bugs, undetectable
+   until data is corrupted elsewhere.
+
+3. **Addresses depend on hardware** — kernel loads at `0x70100000` on QEMU, `0x80000000`
+   on BBB. No abstraction layer, drivers and kernel logic are tightly coupled to the physical
+   layout of each board.
+
+4. **Prerequisite for multi-process** — each process needs its own address space (Chapter 05).
+   No MMU → no per-process page table → no process isolation.
+
+---
+
+## Design
+
+### Section mapping — why 1 MB, not 4 KB
+
+ARMv7-A MMU supports 2 levels of page tables:
+- **L1 section** (1 MB): each entry in the L1 table maps 1 MB VA → 1 MB PA. Only needs one table
+  of 4096 entries = 16 KB.
+- **L1 → L2 page** (4 KB): L1 entry points to a smaller L2 table (256 entries = 1 KB),
+  each L2 entry maps 4 KB.
+
+RingNova chooses **section mapping (1 MB)** because:
+
+- 3 processes, each with 1 MB memory → 1 section descriptor per process
+- Kernel image < 1 MB currently → a few sections are enough
+- No L2 tables needed → less complexity, less memory, fewer bugs
+
+**Trade-off:** wasteful if a process only needs 100 KB but still occupies a 1 MB entry. Acceptable
+for 3 static processes.
+
+### L1 translation table — structure
+
+```
+boot_pgd[4096]:    4096 entries × 4 bytes = 16 KB
+                   Must be 16 KB aligned (TTBR0 requires bits [13:0] = 0)
+
+┌─────────────────────────────────────────────────────┐
+│  Index    VA range              Contents             │
+├─────────────────────────────────────────────────────┤
+│  [0]      0x00000000-0x000FFFFF  → FAULT (zero=NULL) │
+│  [1..9]   ...                    → FAULT              │
+│  ...      ...                    → FAULT              │
+│  [0x100]  0x10000000-0x100FFFFF  → PA 0x10000000     │ QEMU periph
+│  [0x101]  0x10100000-0x101FFFFF  → PA 0x10100000     │ QEMU periph
+│  ...                                                  │
+│  [0x700]  0x70000000-0x700FFFFF  → PA 0x70000000     │ identity
+│  [0x701]  0x70100000-0x701FFFFF  → PA 0x70100000     │ identity
+│  ...      (128 sections total)                        │ identity
+│  ...                                                  │
+│  [0xC00]  0xC0000000-0xC00FFFFF  → PA 0x70000000     │ high VA alias
+│  [0xC01]  0xC0100000-0xC01FFFFF  → PA 0x70100000     │ high VA alias
+│  ...      (128 sections total)                        │ high VA alias
+│  ...                                                  │
+│  [0xFFF]  0xFFF00000-0xFFFFFFFF  → FAULT              │
+└─────────────────────────────────────────────────────┘
+```
+
+**Entry 0 = FAULT** is natural: BSS is zeroed in `start.S`, a section descriptor with
+value 0 has bits [1:0] = `0b00` = FAULT type. No special code needed for the NULL guard —
+it comes for free.
+
+### Identity map — why it's needed, only lives during the boot window
+
+**The chicken-and-egg problem:** when the CPU executes `mcr ... SCTLR` to enable the MMU, PC is at
+PA (e.g. `0x70100XXX`). The next instruction (right after ISB) is also fetched from `0x7010XXXX`.
+If the MMU turns on but `0x7010XXXX` isn't in the page table → **Prefetch Abort on the very first
+instruction after enabling**.
+
+Solution: **identity map** — map VA `0x7010XXXX` → PA `0x7010XXXX` in boot_pgd. After the MMU
+turns on, the CPU fetches at VA `0x7010XXXX`, MMU translates → PA `0x7010XXXX` (same) → survives.
+
+**Identity only needs to "bridge" briefly:**
+
+The kernel is linked at high VA (VMA = `0xC0000000`+), image loaded at PA (LMA = `0x7010...` /
+`0x8000...`). Identity lifecycle:
+
+1. **Pre-MMU:** `start.S` runs at PA via LMA. Identity not needed (MMU off).
+2. **MMU enable:** `mmu_enable` flips `SCTLR.M=1`. PC still at PA → needs identity for the next instruction fetch.
+3. **Trampoline:** `ldr pc, =_start_va` loads the literal VA into PC → PC jumps to high VA.
+   From here the kernel runs via the high-VA alias (`0xC0...`).
+4. **Post-trampoline:** identity no longer used. All symbols in code resolve to VA.
+5. **`mmu_drop_identity()`** (called from kmain after self-tests): clears entries `[0x700..0x77F]`
+   and flushes TLB. Stray PA derefs after this point → Data Abort, bug exposed immediately.
+
+**Branch instructions (`bl`, `b`) don't touch identity** — they use PC-relative offsets. The offset
+between two symbols is a compile-time constant (VA difference = PA difference since the image shifts uniformly).
+Only absolute loads (`ldr rX, =symbol`) load literal VAs.
+
+### High VA alias — 0xC0000000
+
+The page table maps VA `0xC0000000` → PA `RAM_BASE`. This is **where the kernel actually runs after
+the trampoline**, not just an aspirational alias. Its role:
+
+- Symbol resolution: `&kmain = 0xC01xxxxx`, `&uart_printf = 0xC01xxxxx`, etc. The compiler generates
+  code using VA, instruction fetch goes through the MMU at high VA.
+- Per-process page table (Chapter 04): each process has its own L1 table, **without** identity
+  RAM — only `0xC0000000+` (kernel), peripherals, and the user section at `0x40000000`. Context
+  switch swaps TTBR0 without needing a trampoline because PC is already at high VA.
+- Linux ARM 3G/1G convention: kernel in the top 1 GB (`0xC0000000–0xFFFFFFFF`), user in the bottom 3 GB.
+
+### Section descriptor format
+
+Each 32-bit entry in the L1 table:
+
+```
+ 31        20 19  15 14 12 11 10 9  8  5 4 3 2 1 0
+┌───────────┬──────┬─────┬────┬──┬──┬────┬─┬─┬─┬───┐
+│ Base PA   │ ---  │ TEX │ AP │nG│ S│ DOM│XN│C│B│ 10│
+│ [31:20]   │      │     │    │  │  │    │  │ │ │   │
+└───────────┴──────┴─────┴────┴──┴──┴────┴─┴─┴─┴───┘
+                                              └── Type = Section
+```
+
+Attributes used in RingNova:
+
+| Name | Value | Used for |
+|------|-------|----------|
+| `PDE_KERNEL_MEM` | Section + C + B + AP=001 + D0 | Kernel RAM (cached, RW, executable) |
+| `PDE_DEVICE` | Section + AP=001 + D0 + XN | Peripherals (strongly-ordered, no-execute) |
+
+- **C+B** (cacheable + bufferable): normal memory, write-back. CPU cache reads/writes → fast.
+- **Strongly-ordered** (no C, no B): every write to a peripheral must complete before the CPU continues.
+  Required for MMIO — if UART writes are cached, characters won't appear on serial.
+- **XN** (Execute Never): fetching an instruction from the peripheral region → Prefetch Abort. Prevents
+  the CPU from accidentally jumping into register space.
+- **AP=001** (kernel RW, user no-access): only code in Privileged mode (SVC, IRQ, ABT, ...)
+  can access. User mode touch → Data Abort.
+- **Domain 0, DACR=Client**: MMU enforces AP bits. If DACR=Manager then AP is ignored
+  (all accesses pass) — dangerous, only for debugging.
+
+### TTBR0, TTBCR, DACR
+
+- **TTBR0** = physical address of the L1 table + walk attributes (cache policy for hardware
+  table walk). TTBCR=0 → TTBR0 covers the full 4 GB.
+- **DACR** = domain access control. 16 domains, 2 bits each. RingNova uses domain 0
+  for everything, set to Client (= enforce AP).
+
+---
+
+## How it works
+
+### One memory access through the MMU
+
+```mermaid
+flowchart TD
+    CPU["CPU emits VA<br/>(e.g. 0xC0100004)"]
+    IDX["MMU takes bits [31:20]<br/>= 0xC01 = index 3073"]
+    LOOKUP["Read boot_pgd[3073]<br/>from RAM"]
+    CHECK{Entry type?}
+    FAULT["Data Abort!<br/>(DFAR=VA, DFSR=fault type)"]
+    PERM{AP check<br/>current mode?}
+    DENY["Data Abort!<br/>(permission fault)"]
+    OK["PA = entry[31:20] | VA[19:0]<br/>= 0x70100004<br/>Send PA on bus"]
+
+    CPU --> IDX --> LOOKUP --> CHECK
+    CHECK -- "FAULT (00)" --> FAULT
+    CHECK -- "Section (10)" --> PERM
+    PERM -- "Denied" --> DENY
+    PERM -- "Allowed" --> OK
+```
+
+The entire process happens **in hardware**, every instruction. The kernel doesn't intervene
+at runtime — it only needs to set up the table correctly at boot.
+
+### MMU enable sequence
+
+Strict order — swapping any step can corrupt:
+
+```mermaid
+flowchart TD
+    A["1. DSB<br/>drain pending writes"]
+    B["2. ICIALLU + DSB + ISB<br/>invalidate I-cache<br/>(stale lines from MMU-off)"]
+    C["3. MCR TTBR0<br/>= boot_pgd PA + walk attrs"]
+    D["4. MCR TTBCR = 0<br/>TTBR0 covers 4 GB"]
+    E["5. MCR DACR = 0x1<br/>D0=Client, enforce AP"]
+    F["6. TLBIALL + DSB + ISB<br/>invalidate entire TLB"]
+    G["7. Read-modify-write SCTLR<br/>set M=1, C=1, I=1, Z=1"]
+    H["8. ISB<br/>pipeline sync — next fetch<br/>goes through MMU"]
+
+    A --> B --> C --> D --> E --> F --> G --> H
+```
+
+**Why each barrier matters:**
+- **DSB before TTBR0**: writes not yet complete when page table changes → corrupt
+- **ICIALLU**: I-cache may contain instructions fetched while MMU was off — if kept, CPU
+  could execute instructions from cache that the MMU hasn't verified → bypass isolation
+- **TLBIALL**: TLB caches old translations (from when MMU was off or previous tests) — must be cleared
+- **ISB after SCTLR**: the next instruction in the pipeline may have been fetched before
+  M=1 took effect — ISB forces a pipeline flush, re-fetches through the MMU
+
+---
+
+## Implementation
+
+### Files
+
+| File | Contents |
+|------|----------|
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Section descriptor macros, VA constants, API prototypes |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | `boot_pgd[4096]` + `mmu_build_boot_pgd(pgd)` (receives PA pointer) |
+| [kernel/arch/arm/mm/mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S) | Assembly: TTBR0 → DACR → SCTLR flip → ISB |
+| [kernel/arch/arm/mm/mmu.c](../../kernel/arch/arm/mm/mmu.c) | `mmu_init(phys_offset)` + `mmu_print_status` + `mmu_drop_identity` |
+| [kernel/arch/arm/boot/start.S](../../kernel/arch/arm/boot/start.S) | Pre-MMU setup, `bl mmu_init`, `ldr pc, =_start_va` trampoline |
+
+### Key points
+
+**Page table allocation** — `boot_pgd` is a static 16 KB array in `.bss.pgd`, 16 KB aligned:
+
+```c
+uint32_t boot_pgd[4096]
+    __attribute__((aligned(16384)))
+    __attribute__((section(".bss.pgd")));
+```
+
+BSS is zeroed by `start.S` → all entries default to FAULT. `mmu_build_boot_pgd()` only needs
+to fill the entries that need mapping; the rest are automatically NULL guards.
+
+**Build page table** — helper `map_range()` populates consecutive entries:
+
+```c
+/* Example: map 128 MB kernel RAM identity */
+map_range(RAM_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
+/* Example: map 128 MB kernel high VA alias */
+map_range(VA_KERNEL_BASE, RAM_BASE, RAM_SIZE, PDE_KERNEL_MEM);
+```
+
+Platform-specific peripheral mapping uses `#ifdef PLATFORM_QEMU / PLATFORM_BBB` — QEMU maps
+2 sections at `0x10000000`, BBB maps 1 section `0x44E00000` + 16 sections `0x48000000`.
+All use `PDE_DEVICE` (strongly-ordered + XN).
+
+**MMU enable** — assembly routine `mmu_enable(uint32_t pgd_pa)` in
+[mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S), 8-step sequence as shown in the diagram.
+TTBR0 walk attributes `0x4A` = inner WB-WA + outer WB-WA + shareable.
+
+**Linker script** — adds `.bss.pgd` section to `.bss`, 16 KB aligned before placement:
+
+```ld
+.bss (NOLOAD) : {
+    _bss_start = .;
+    . = ALIGN(16384);
+    *(.bss.pgd)        /* boot_pgd — 16 KB aligned */
+    *(.bss*)
+    ...
+}
+```
+
+---
+
+## Testing
+
+Boot self-tests run automatically every boot (9 tests), printing [PASS] or [FAIL]:
+
+| Test | Checks | If fail means |
+|------|--------|---------------|
+| **T1** SCTLR.M=1 | MMU is actually on | `mmu_enable` didn't write SCTLR correctly |
+| **T2** TTBR0 base == PA of `boot_pgd` | CPU is walking the correct page table at PA (`boot_pgd` symbol is VA, subtract PHYS_OFFSET to get PA) | TTBR0 loaded wrong, or migration forgot to convert VA→PA |
+| **T3** VA alias read == PA read | `*0xC0100000 == *0x70100000` — both high VA + identity point to the same PA | High VA map wrong, or identity dropped too early |
+| **T4** Identity coherence PA↔VA | Write via PA (identity), read back via VA; then reverse | Identity map not write-coherent with high VA (cache attrs differ) |
+| **T5** SVC exception return | `svc #42` → handler → normal return | Exception path broken after MMU on |
+
+One destructive test (enable manually with `#define EXCEPTION_TEST TEST_NULL_DEREF`):
+
+| Test | Trigger | Result |
+|------|---------|--------|
+| **NULL deref** | `*(int*)0 = 0xDEADBEEF` | Data Abort, DFAR=0x00000000, DFSR=0x805 (translation fault, section) |
+
+The NULL test verifies that entry 0 is truly FAULT — the MMU blocks the access instead of
+succeeding (as it would with MMU off on QEMU).
+
+> **Order note:** T3 + T4 must run **before** `mmu_drop_identity()`. After identity is dropped,
+> `*((uint32_t*)0x70100000)` faults immediately. In `kmain`, the flow is:
+> `run_boot_tests()` → `mmu_drop_identity()` — wrong order = test hangs.
+
+**Not yet tested:**
+
+- Kernel execute from PA is no longer allowed (confirming `mmu_drop_identity` is effective) — needs
+  a test case that deliberately jumps to PA and verifies Prefetch Abort.
+- BBB hardware (only builds, not flashed yet).
+
+---
+
+## Links
+
+### Files in the codebase
+
+| File | Role |
+|------|---------|
+| [kernel/include/mmu.h](../../kernel/include/mmu.h) | Descriptor macros + API |
+| [kernel/arch/arm/mm/pgtable.c](../../kernel/arch/arm/mm/pgtable.c) | Page table builder |
+| [kernel/arch/arm/mm/mmu_enable.S](../../kernel/arch/arm/mm/mmu_enable.S) | Assembly enable sequence |
+| [kernel/arch/arm/mm/mmu.c](../../kernel/arch/arm/mm/mmu.c) | Init orchestration |
+| [kernel/platform/qemu/board.h](../../kernel/platform/qemu/board.h) / [bbb/board.h](../../kernel/platform/bbb/board.h) | RAM_BASE, PHYS_OFFSET, peripheral addresses per-board |
+| [kernel/platform/qemu/periph_map.c](../../kernel/platform/qemu/periph_map.c) / [bbb/periph_map.c](../../kernel/platform/bbb/periph_map.c) | `platform_map_peripherals()` — PA-safe literal map of each board's MMIO windows |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | Dual MEMORY PHYS/VIRT, `.bss.pgd` placement, `_start_phys` e_entry |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | (same for BBB) |
+
+### Dependencies
+
+- **Chapter 01 — Boot**: BSS must be zeroed first → `boot_pgd` defaults to FAULT
+- **Chapter 02 — Exceptions**: Data Abort handler must exist → debug when MMU setup is wrong
+
+### Next up
+
+**Chapter 04 — Interrupts →** MMU on, peripheral addresses mapped. Now we can set up the INTC
+(interrupt controller) and Timer — peripheral drivers read/write registers via VA (peripheral
+sections remain identity-mapped, not dropped by `mmu_drop_identity` since only the RAM range is removed).
+Timer interrupts are the prerequisite for preemptive scheduling (Chapter 06).
+
+---
+
+<a id="tiếng-việt"></a>
+
+**Tiếng Việt** · [English](#english)
 
 > Boot xong, exception handler hoạt động. Nhưng mọi code đều nhìn thấy toàn bộ RAM — kernel,
 > driver, data — tất cả nằm trơ trọi, không rào, không khoá. Một dòng code sai ghi đè UART

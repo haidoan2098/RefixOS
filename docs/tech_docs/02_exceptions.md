@@ -1,4 +1,450 @@
-# Chapter 02 — Exceptions: Bắt lỗi thay vì crash mù
+# Chapter 02 — Exceptions: Exception handling instead of uncontrolled crashes
+
+<a id="english"></a>
+
+**English** · [Tiếng Việt](#tiếng-việt)
+
+> Boot is done, UART works. But if the CPU hits something unusual — a bad address,
+> an invalid instruction, hardware asking for attention — where does it jump? Nothing
+> is there yet → the CPU runs into garbage → silent crash. This chapter builds the
+> safety net so every abnormal event is caught and handled under control.
+
+---
+
+## What has been built so far
+
+After this chapter, the system looks like the diagram below. Modules marked with ★
+are **new in this chapter**; the rest already existed in previous chapters.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    User space                       │
+│                                                      │
+│                    (chưa có)                         │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────────────────────────────────────┐
+│                   Kernel (SVC mode)                  │
+│                                                      │
+│   ┌────────────┐   ┌─────────────────────────┐       │
+│   │   kmain    │──▶│ ★ Exception Handler     │       │
+│   │            │   │   ├─ vector table       │       │
+│   │            │   │   ├─ entry stubs        │       │
+│   │            │   │   ├─ C handlers         │       │
+│   │            │   │   └─ DFAR/DFSR decode   │       │
+│   └────────────┘   └─────────────────────────┘       │
+│          │                                           │
+│          ▼                                           │
+│   ┌────────────┐   ┌─────────────────────────┐       │
+│   │   UART     │   │    Boot sequence        │       │
+│   │  driver    │   │    (start.S)            │       │
+│   │ (PL011 +   │   │    stacks / BSS / C     │       │
+│   │  NS16550)  │   │                         │       │
+│   └────────────┘   └─────────────────────────┘       │
+│                                                      │
+│           MMU: OFF   ·   IRQ: masked                 │
+└──────────────────────────────────────────────────────┘
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                      Hardware
+              CPU · RAM · UART · (timer/INTC chưa dùng)
+```
+
+**Current boot flow:**
+
+```mermaid
+flowchart LR
+    A[Reset] --> B[start.S<br/>setup stacks<br/>zero BSS]
+    B --> C[kmain]
+    C --> D[uart_init]
+    D --> E["★ exception_init<br/>(set VBAR)"]
+    E --> F[idle loop]
+
+    style E fill:#ffe699,stroke:#e8a700,color:#000
+```
+
+What is new: after `uart_init`, kmain calls `exception_init()` → the CPU has a valid
+vector table → every exception from here on has a handler. Before jumping to Chapter 03
+(MMU), this is the "safe" point — if MMU setup is wrong, the exception handler prints
+DFAR/DFSR instead of crashing silently.
+
+---
+
+## Principle
+
+### The CPU does not know what "crash" means
+
+A common misconception: when the CPU hits an error, it "crashes". In reality, the CPU
+has **no concept of crash**. It only knows: fetch the instruction at PC, decode, execute,
+increment PC, repeat. If the instruction is bad → undefined behavior. If the address is
+bad → read/write garbage. If nothing stops it → the CPU keeps running into garbage regions.
+
+What we call "crash" is really: **the CPU runs into a region that is not our code, and
+its behavior becomes unpredictable**.
+
+ARMv7 solves this with a simple mechanism: when a special situation occurs, the CPU
+**automatically jumps to a fixed address**. The code at that address is responsible for
+handling it. If correct code is there → the system stays in control. If not → still a
+silent crash, but this time it is the kernel's fault, not the CPU's.
+
+### What is an exception
+
+An exception is **any event that causes the CPU to stop the current execution stream and
+jump to a handler**. It is not an "error" — it is a **mechanism**. The same mechanism serves:
+
+- **Timer fires** → IRQ → kernel reclaims the CPU to schedule
+- **A process touches a forbidden address** → Data Abort → kernel decides: kill the process or grow memory?
+- **A user program calls the kernel** → SVC → kernel runs the syscall
+- **A strange instruction appears** → Undefined → kernel can emulate (e.g. no FPU present)
+
+Exceptions are **the only language hardware uses to talk to software**. Without them,
+the kernel is deaf and blind — no way to know the timer fired, no way to know what the
+process did wrong, no way for user mode to enter kernel mode.
+
+### Vector table — where the CPU knows to jump
+
+The CPU does not know where the handler lives. It only knows one thing: when an exception
+happens, **jump to a fixed slot in a table**. That table is the **vector table**.
+
+ARMv7 has exactly 8 slots:
+
+| offset | exception | when it happens |
+| --- | --- | --- |
+| 0x00 | Reset | CPU just powered on or reset |
+| 0x04 | Undefined Instruction | Decode hit an invalid instruction |
+| 0x08 | Supervisor Call (SVC) | `svc #N` instruction (syscall) |
+| 0x0C | Prefetch Abort | Instruction fetch from an invalid address |
+| 0x10 | Data Abort | Load/store from an invalid address |
+| 0x14 | Reserved | — |
+| 0x18 | IRQ | External interrupt (timer, UART, ...) |
+| 0x1C | FIQ | Fast interrupt (higher priority) |
+
+Each slot is 4 bytes — exactly 1 ARM instruction. That is not the handler — it is the
+**instruction that leads to the handler**. The common pattern: `ldr pc, [pc, #offset]` —
+load the handler address from the literal pool next to it, jump there.
+
+By default the CPU looks for the vector table at address 0. But it can be changed via
+**VBAR** (Vector Base Address Register) — the kernel writes the desired address into VBAR,
+and the CPU uses that address as the base of the vector table.
+
+---
+
+## Context
+
+```
+CPU state right now:
+- PC        : pointing into kmain, boot log already printed
+- MMU       : OFF — every address is physical
+- IRQ/FIQ   : masked (not enabled yet)
+- SP        : SVC stack, running C code
+- VBAR      : not set → CPU uses default (usually 0x00000000)
+- Have     : UART working, boot log is visible
+- Missing  : handlers for any exception
+```
+
+If a Data Abort happens now, the CPU jumps to `VBAR + 0x10`. VBAR is 0, so it jumps to
+`0x00000010`. There is no code of ours there — it is garbage. The CPU fetches a garbage
+instruction, decodes, executes — behavior unpredictable.
+
+---
+
+## Problem
+
+- **Debugging is impossible** — any memory-related bug (bad pointer, unaligned access,
+  stack overflow) leads to a silent crash. No PC, register, or faulting address to work with.
+
+- **Cannot do MMU (Chapter 03)** — enable MMU slightly wrong → Data Abort on the very next
+  instruction. No handler → no clue where the error is. MMU bugs are the hardest kind of
+  bug and need the most precise debug output. **Exception handlers must exist BEFORE MMU.**
+
+- **Cannot do interrupts (Chapter 04)** — timer fires → IRQ → jump to IRQ slot → no code
+  → crash.
+
+- **Cannot do syscalls (Chapter 07)** — user program calls `svc #N` → jump to the SVC slot
+  → no code → no way into the kernel.
+
+Exception handling is **a prerequisite for everything that follows** — not a feature,
+but infrastructure.
+
+---
+
+## Design
+
+### Vector table: 32 bytes + literal pool
+
+```
+0x00  ldr pc, _vec_reset       ─┐
+0x04  ldr pc, _vec_undef        │
+0x08  ldr pc, _vec_svc          │  8 instruction × 4 byte
+0x0C  ldr pc, _vec_pabort       │  = 32 byte
+0x10  ldr pc, _vec_dabort       │
+0x14  nop                       │
+0x18  ldr pc, _vec_irq          │
+0x1C  ldr pc, _vec_fiq         ─┘
+
+_vec_reset:   .word _start                       ┐
+_vec_undef:   .word exception_entry_undef        │  literal pool
+_vec_svc:     .word exception_entry_svc          │  kề ngay vector table
+...                                              ┘
+```
+
+**Why `ldr pc` instead of `b handler`?** — The `b` instruction can only jump ±32 MB.
+The kernel is linked at VA `0xC0100000`, and C handlers can live anywhere in 4 GB → `b`
+may not reach. `ldr pc, [literal]` loads a full 32-bit address → jumps anywhere, high VA
+or even user VA if needed.
+
+### VBAR — where to put the vector table
+
+The kernel writes the vector table's address into VBAR (a cp15 register). The CPU then
+computes the slot as VBAR + offset:
+
+```text
+VBAR = &_vectors_start   (high VA, e.g. 0xC01000A0)
+
+Data Abort occurs:
+  PC ← VBAR + 0x10 = 0xC01000B0
+  CPU fetches `ldr pc, _vec_dabort` (through the MMU) → jumps to handle_data_abort
+```
+
+**Constraint**: VBAR must be **32-byte aligned**. The linker script adds `. = ALIGN(32)`
+before the `.vectors` section.
+
+**VBAR must be a VA, not a PA:** `exception_init` is called after the MMU is on and the
+trampoline is in place, so `&_vectors_start` resolves to a VA. The CPU fetches the vector
+through the MMU at `0xC01000A0+offset` → correct. If VBAR were set to a PA, once the
+identity RAM mapping is dropped (chapter 03) the exception would no longer be able to
+fetch the vector → triple fault.
+
+### LR adjustment — different per exception
+
+When an exception happens, the CPU saves the return address into LR (banked per mode).
+But that address **is not always the faulting instruction** — depending on the exception,
+it is offset by pipeline effects.
+
+| Exception | LR value | Adjust | Meaning |
+|-----------|----------|--------|---------|
+| Undefined | PC_fault + 4 | `sub lr, #4` | → faulting instruction |
+| SVC | PC_svc + 4 | — | → the NEXT instruction (the right place to return to) |
+| Prefetch Abort | PC_fault + 4 | `sub lr, #4` | → faulting instruction |
+| Data Abort | PC_fault + 8 | `sub lr, #8` | → faulting instruction (pipeline) |
+| IRQ | PC_next + 4 | `sub lr, #4` | → the interrupted instruction |
+| FIQ | PC_next + 4 | `sub lr, #4` | → the interrupted instruction |
+
+**SVC is the only one that is not adjusted** — because SVC is a deliberate call, not an
+error. After handling it, the handler must return to **the instruction after SVC**, not
+SVC itself (adjusting would call it again → infinite loop).
+
+### The exception stack is a trampoline, not a workspace
+
+When an exception happens, the CPU automatically switches to the corresponding mode
+(ABT/UND/IRQ/...) and uses the **banked SP** of that mode (already set up in `start.S`).
+Each mode has only one small stack (1 KB) — **shared** across every exception of that kind.
+
+You cannot run complex logic on this stack:
+- The exception stack is small, not enough for deep C functions
+- Shared → nested exceptions of the same kind will corrupt it
+
+**Correct pattern**: the stub on the exception stack only acts as a trampoline — save a
+few registers, switch to SVC mode, then let the C handler run on the SVC stack (8 KB).
+Details in the How-it-works section.
+
+---
+
+## How it works
+
+### Lifecycle of an exception
+
+The diagram below describes the common flow for every exception type. They only differ
+in the "Adjust LR" step (per the Design table) and the final branch (fatal/return).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Code as User code<br/>(đang ở SVC mode)
+    participant CPU
+    participant Vec as Vector Table
+    participant Stub as Entry Stub<br/>(assembly)
+    participant Hdlr as C Handler
+    participant UART
+
+    Code->>CPU: instruction bình thường
+    Note over CPU: gặp fault / svc / irq
+    CPU->>CPU: tự chuyển mode<br/>(ABT / UND / IRQ / ...)<br/>SP đổi sang stack của mode đó<br/>Lưu LR, SPSR
+    CPU->>Vec: PC ← VBAR + offset
+    Vec->>Stub: ldr pc, _vec_X
+    Stub->>Stub: adjust LR (sub #4/#8)
+    Stub->>Stub: save {r0-r12, lr, spsr}<br/>lên exception stack
+    Stub->>Stub: cps #0x13 (switch SVC)
+    Stub->>Hdlr: bl handle_X(ctx)
+    Hdlr->>UART: in debug info
+
+    alt Fatal (Data/Prefetch Abort, Undefined)
+        Hdlr->>Hdlr: halt forever
+    else Return được (SVC)
+        Hdlr-->>Stub: return
+        Stub->>Stub: restore {r0-r12, spsr}
+        Stub->>CPU: ldmfd {..., pc}^<br/>(pop PC, SPSR → CPSR)
+        CPU->>Code: tiếp tục instruction sau SVC
+    end
+```
+
+**Key points:**
+- Step 3: **the CPU does it by itself** — switches mode, banked SP changes, LR/SPSR saved
+  by hardware. Code has no control here.
+- Step 7: **trampoline** — after `cps #0x13`, from here on the C handler runs on the
+  SVC stack (8 KB), no longer limited by the small exception stack.
+- Step 11: **`^` matters** — `ldmfd {..., pc}^` not only pops PC but also copies SPSR →
+  CPSR, restoring the full CPU state (mode, flags, IRQ mask) to exactly what it was
+  before the exception.
+
+### Mode & stack changes during handling
+
+A concrete illustration when a Data Abort happens from SVC mode:
+
+```
+(1) Trước exception              (2) Trong entry stub              (3) Trong C handler
+    (code bình thường)              (exception mode)                 (sau cps #0x13)
+─────────────────────        ───────────────────────────       ───────────────────────────
+Mode:  SVC                   Mode:  ABT                        Mode:  SVC (quay lại)
+SP  :  _svc_stack_top        SP  :  _abt_stack_top             SP  :  _svc_stack_top
+                                    (banked, 1 KB)                    (banked, 8 KB)
+
+[SVC stack]                  [ABT stack]                       [SVC stack]
+┌──────────────┐             ┌──────────────┐                  ┌──────────────┐
+│              │             │   lr (adj)   │ ← vừa push       │              │
+│  kmain       │             │   r12        │                  │  kmain       │
+│  frame       │             │   ...        │                  │  frame       │
+│              │             │   r0         │                  ├──────────────┤
+│              │             │   spsr       │ ← sp_abt         │  handle_X    │
+│              │             │              │   r0 = sp_abt    │  frame       │
+└──────────────┘             └──────────────┘   (con trỏ ctx)  │  (8 KB OK)   │
+                                                                └──────────────┘
+```
+
+Three things happen between step (2) → (3):
+1. **`cps #0x13` switches mode** — hardware automatically swaps the banked SP: from
+   `_abt_stack_top` to `_svc_stack_top`
+2. **r0 is preserved** — it points into the frame on the ABT stack, still reachable from
+   SVC mode (same address space, just a different mode)
+3. **The C handler uses the SVC stack** for local variables, uart_printf, deep function
+   calls — it no longer touches the ABT stack
+
+This is why the exception stack is called a **trampoline**: used only for a few
+instructions (step 2), then we "jump" onto the SVC stack (step 3) to do real work.
+
+---
+
+## Implementation
+
+### Files
+
+| File | Contents |
+|------|----------|
+| [vectors.S](../../kernel/arch/arm/exception/vectors.S) | Vector table (8 slots + literal pool) |
+| [exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | 6 entry stubs: undef, svc, pabort, dabort, irq, fiq |
+| [exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | C handlers: read fault registers, dump context, halt/return |
+| [exception.h](../../kernel/include/exception.h) | `exception_context_t` struct + handler prototypes |
+
+### Key points
+
+**Vector table** — 8 slots using the `ldr pc, _vec_X` pattern, literal pool placed right
+after it. The `.vectors` section in the linker script is 32-byte aligned so VBAR is valid.
+
+**Entry stub** — every stub has the same skeleton (only LR adjust differs):
+
+```asm
+/* Ví dụ: Data Abort */
+exception_entry_dabort:
+    sub     lr, lr, #8           /* adjust theo bảng Thiết kế */
+    stmfd   sp!, {r0-r12, lr}    /* save context */
+    mrs     r0, spsr
+    stmfd   sp!, {r0}
+    mov     r0, sp               /* r0 = &exception_context_t */
+    cps     #0x13                /* switch SVC mode */
+    bl      handle_data_abort    /* C handler chạy trên SVC stack */
+    b       .                    /* fatal — không return */
+```
+
+Undefined and Prefetch Abort use **the same pattern**, only differing in `sub lr, #4`
+and the handler name. SVC skips the `cps` step (already in SVC) and ends with
+`ldmfd {..., pc}^` to return.
+
+**C handler** — uniform shape:
+1. Read the specific fault register (DFAR/DFSR for Data Abort, IFAR/IFSR for Prefetch)
+2. Print `[PANIC]` + fault register + a full register dump over UART
+3. Halt forever (fatal) or return (SVC)
+
+**exception_init** — write VBAR and `isb`:
+
+```c
+void exception_init(void) {
+    uint32_t vbar = (uint32_t)&_vectors_start;
+    __asm__ volatile("mcr p15, 0, %0, c12, c0, 0" :: "r"(vbar));
+    __asm__ volatile("isb" ::: "memory");   /* flush pipeline */
+}
+```
+
+`isb` ensures the new VBAR takes effect before any exception can possibly occur.
+
+---
+
+## Testing
+
+Not every one of the 7 exceptions can be tested at this step — many need MMU/timer to
+trigger. Testing 3 representative kinds is enough to cover the key mechanisms.
+
+| Test | How to trigger | Mechanisms covered | Result |
+|------|-------------|----------------|---------|
+| **SVC #42** | `asm("svc #42")` | Vector routing, context save/restore, return path | Handler prints the syscall number, returns to the instruction after SVC |
+| **Undefined** | `.word 0xE7F000F0` (permanently-undefined opcode) | LR adjust -4, mode switch (UND → SVC), fatal halt | PANIC dump with PC pointing at the `.word` address |
+| **Data Abort** | Enable `SCTLR.A` + read 32-bit at an odd address | LR adjust -8, read fault register (DFAR/DFSR), fatal halt | PANIC dump with DFAR = the unaligned address, DFSR = 0x01 (alignment) |
+
+**Why not test unmapped memory?** — QEMU with MMU off does not fault when reading an
+address without a peripheral (it returns 0). We must use an alignment check to trigger
+a Data Abort reliably. Once MMU is in (Chapter 03), we can test by reading an unmapped
+VA region.
+
+**Exceptions not yet tested:**
+- **Prefetch Abort** — needs MMU to create an unmapped instruction region. Chapter 03 tests it.
+- **IRQ** — interrupts are not enabled yet. Chapter 04 tests it through the timer.
+- **FIQ** — not used in RingNova.
+
+3 tests are enough because **every entry stub shares the same pattern**: Data Abort proves
+LR adjust + fatal path + fault register access; Undefined proves mode switching; SVC
+proves the return path. Prefetch Abort and IRQ use the exact same pattern — they get
+verified automatically once MMU and the timer run for real.
+
+---
+
+## Links
+
+### Files in the codebase
+
+| File | Role |
+|------|---------|
+| [kernel/arch/arm/exception/vectors.S](../../kernel/arch/arm/exception/vectors.S) | Vector table |
+| [kernel/arch/arm/exception/exception_entry.S](../../kernel/arch/arm/exception/exception_entry.S) | Entry stubs |
+| [kernel/arch/arm/exception/exception_handlers.c](../../kernel/arch/arm/exception/exception_handlers.c) | C handlers + VBAR setup |
+| [kernel/include/exception.h](../../kernel/include/exception.h) | Context struct + prototypes |
+| [kernel/linker/kernel_qemu.ld](../../kernel/linker/kernel_qemu.ld) | `.vectors` section alignment |
+| [kernel/linker/kernel_bbb.ld](../../kernel/linker/kernel_bbb.ld) | (same for BBB) |
+
+### Dependencies
+
+- **Chapter 01 — Boot**: exception stacks must be set up first (`start.S`), because the entry stubs use them
+- **Chapter 00 — Foundation**: CPU modes, banked registers — needed to understand why each mode has its own SP
+
+### Next up
+
+**Chapter 03 — MMU →** Exception handlers work → we have "eyes" to debug with. Now we
+can safely turn the MMU on. If the page table is wrong → Data Abort → the handler prints
+DFAR/DFSR → we know exactly where the error is. Without Chapter 02, Chapter 03 is walking
+in the dark.
+
+---
+
+<a id="tiếng-việt"></a>
+
+**Tiếng Việt** · [English](#english)
 
 > Boot xong, UART hoạt động. Nhưng nếu CPU gặp tình huống bất thường — truy cập địa chỉ
 > sai, instruction không hợp lệ, hardware cần chú ý — thì nó nhảy vào đâu? Chưa có gì
